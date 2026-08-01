@@ -62,4 +62,41 @@ for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
   echo "--- $pub: $outcome (works=$works)"
 done
 
+# ---- derived consumption layer (lex-articles): regenerate, guard, push (§ blueprint inc 4).
+# Determinism guard: derived files may only change when a corpus changed — a diff without
+# any corpus commit means extractor nondeterminism or profile drift, and commits nothing.
+echo "=== derive (lex-articles) ==="
+derive_outcome="failed"
+if git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/SFHAJJI/lex-articles.git" articles; then
+  derive_ok=1
+  for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
+    [ -d "corpus-$pub" ] || continue
+    dotnet run --project lex/src/Lex.Ingest -c Release -- derive --publisher "$pub" --corpus "corpus-$pub" --out articles || derive_ok=0
+  done
+  [ "$derive_ok" = 1 ] && { dotnet run --project lex/src/Lex.Ingest -c Release -- catalog --articles articles || derive_ok=0; }
+  if [ "$derive_ok" = 1 ]; then
+    changed=$(git -C articles status --porcelain | wc -l)
+    committed=$(grep -c '"outcome": *"ran_committed"' status/*.json 2>/dev/null || true)
+    if [ "$changed" -gt 0 ] && [ "${committed:-0}" -eq 0 ]; then
+      echo "DERIVE NONDETERMINISM: $changed derived files changed with no corpus change. Committing nothing."
+      derive_outcome="failed_nondeterminism"; overall_rc=1
+    elif [ "$changed" -gt 0 ]; then
+      git -C articles config user.name "lex-ops"
+      git -C articles config user.email "haji.soufien@gmail.com"
+      git -C articles add catalog.json lu-legilux eu-eurlex 2>/dev/null
+      git -C articles commit -m "nightly derive $STAMP" && git -C articles push \
+        && derive_outcome="ran_committed" || { derive_outcome="failed_push"; overall_rc=1; }
+    else
+      derive_outcome="ran_no_change"
+    fi
+  else
+    overall_rc=1
+  fi
+else
+  derive_outcome="failed_clone"; overall_rc=1
+fi
+jq -n --arg run "$STAMP" --arg outcome "$derive_outcome" \
+  '{publisher:"lex-articles", run:$run, outcome:$outcome}' > "status/lex-articles.json"
+echo "--- lex-articles: $derive_outcome"
+
 exit $overall_rc
