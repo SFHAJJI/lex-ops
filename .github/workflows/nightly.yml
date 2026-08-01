@@ -1,0 +1,53 @@
+name: nightly-fleet
+on:
+  schedule:
+    - cron: "17 2 * * *"   # staggered off the 02:00 peak; the fleet's ONLY cron
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  fleet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: SFHAJJI/lex
+          path: lex
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: restore signing key
+        env:
+          LEX_SIGNING_KEY: ${{ secrets.LEX_SIGNING_KEY }}
+        run: printf '%s' "$LEX_SIGNING_KEY" > signing-key.pem
+
+      - name: run fleet
+        env:
+          GH_TOKEN: ${{ secrets.LEX_OPS_TOKEN }}
+        run: bash fleet.sh
+
+      - name: commit status (one commit per night, never into corpus repos)
+        if: always()
+        run: |
+          git config user.name "lex-ops"
+          git config user.email "haji.soufien@gmail.com"
+          git add status
+          git commit -m "fleet status $(date -u +%F)" || echo "no status change"
+          git push || true
+
+      - name: fleet-status issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "fleet-status: nightly failed $(date -u +%F)" \
+            --body "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID — check per-publisher status/ records." \
+            || true
