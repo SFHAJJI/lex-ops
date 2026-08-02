@@ -99,4 +99,47 @@ jq -n --arg run "$STAMP" --arg outcome "$derive_outcome" \
   '{publisher:"lex-articles", run:$run, outcome:$outcome}' > "status/lex-articles.json"
 echo "--- lex-articles: $derive_outcome"
 
+# ---- dataset release assets (lex-articles): JSONL.gz + parquet, only when derive committed.
+# All row fields are flat strings, so parquet schema inference is deterministic.
+echo "=== dataset (lex-articles release assets) ==="
+dataset_outcome="skipped_no_change"
+if [ "$derive_outcome" = "ran_committed" ]; then
+  dataset_ok=1
+  dotnet run --project lex/src/Lex.Ingest -c Release -- dataset --articles articles --out dataset || dataset_ok=0
+  if [ "$dataset_ok" = 1 ]; then
+    python3 -m pip install --quiet pyarrow \
+      || python3 -m pip install --quiet --break-system-packages pyarrow || dataset_ok=0
+  fi
+  if [ "$dataset_ok" = 1 ]; then
+    python3 - <<'PYEOF' || dataset_ok=0
+import glob, gzip, shutil
+import pyarrow.json as pj, pyarrow.parquet as pq
+for gzpath in glob.glob("dataset/*-provisions.jsonl.gz"):
+    jl = gzpath[:-3]
+    with gzip.open(gzpath, "rb") as fin, open(jl, "wb") as fout:
+        shutil.copyfileobj(fin, fout)
+    out = jl.replace(".jsonl", ".parquet")
+    pq.write_table(pj.read_json(jl), out, compression="zstd")
+    print("parquet:", out)
+PYEOF
+  fi
+  if [ "$dataset_ok" = 1 ]; then
+    tag="dataset-$(date -u +%F)"
+    if gh release create "$tag" dataset/*-provisions.jsonl.gz dataset/*-provisions.parquet \
+         --repo SFHAJJI/lex-articles --title "dataset $(date -u +%F)" \
+         --notes "One row per provision-version (licence + attribution inline). JSONL.gz and parquet, same rows. Regenerated nightly when the law changes." \
+       || gh release upload "$tag" dataset/*-provisions.jsonl.gz dataset/*-provisions.parquet \
+            --repo SFHAJJI/lex-articles --clobber; then
+      dataset_outcome="ran_published"
+    else
+      dataset_outcome="failed_release"; overall_rc=1
+    fi
+  else
+    dataset_outcome="failed_build"; overall_rc=1
+  fi
+fi
+jq -n --arg run "$STAMP" --arg outcome "$dataset_outcome" \
+  '{publisher:"lex-dataset", run:$run, outcome:$outcome}' > "status/lex-dataset.json"
+echo "--- lex-dataset: $dataset_outcome"
+
 exit $overall_rc
