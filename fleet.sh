@@ -142,4 +142,27 @@ jq -n --arg run "$STAMP" --arg outcome "$dataset_outcome" \
   '{publisher:"lex-dataset", run:$run, outcome:$outcome}' > "status/lex-dataset.json"
 echo "--- lex-dataset: $dataset_outcome"
 
+# ---- KPI line (append-only): one JSON line per night with fleet-wide coverage numbers.
+# git history of status/*.json has the same facts, but a flat JSONL makes trends readable
+# without git archaeology (and feeds any future /coverage sparkline directly).
+echo "=== kpi ==="
+kpi_works=0; kpi_versions=0
+for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
+  [ -f "corpus-$pub/manifest.json" ] || continue
+  kpi_works=$((kpi_works + $(jq -r '.works // 0' "corpus-$pub/manifest.json")))
+  kpi_versions=$((kpi_versions + $(jq -r '.versions // 0' "corpus-$pub/manifest.json")))
+done
+art_works=0; art_anchors=0; art_versions=0
+if [ -f articles/catalog.json ]; then
+  art_works=$(jq '[.works[]] | length' articles/catalog.json)
+  art_anchors=$(jq '[.works[].anchors] | add // 0' articles/catalog.json)
+  art_versions=$(jq '[.works[].derived_versions] | add // 0' articles/catalog.json)
+fi
+jq -nc --arg run "$STAMP" \
+  --argjson works "$kpi_works" --argjson versions "$kpi_versions" \
+  --argjson art_works "$art_works" --argjson art_versions "$art_versions" --argjson art_anchors "$art_anchors" \
+  '{run:$run, corpus:{works:$works, versions:$versions}, articles:{works:$art_works, derived_versions:$art_versions, anchors:$art_anchors}}' \
+  >> status/kpi.jsonl
+tail -1 status/kpi.jsonl
+
 exit $overall_rc
