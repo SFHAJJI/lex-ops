@@ -66,7 +66,10 @@ if git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/SFHAJJI/le
   [ "$derive_ok" = 1 ] && { dotnet run --project lex/src/Lex.Ingest -c Release -- catalog --articles articles || derive_ok=0; }
   if [ "$derive_ok" = 1 ]; then
     changed=$(git -C articles status --porcelain | wc -l)
-    committed=$(grep -c '"outcome": *"ran_committed"' status/*.json 2>/dev/null || true)
+    # grep -c over MULTIPLE files prints "path:count" per file, not a total — the old form
+    # produced a multi-line string, the integer test below errored, and the guard fell
+    # through to committing. It had never once fired. Count matching FILES instead.
+    committed=$(grep -l '"outcome": *"ran_committed"' status/*.json 2>/dev/null | wc -l)
     if [ "$changed" -gt 0 ] && [ "${committed:-0}" -eq 0 ]; then
       echo "DERIVE NONDETERMINISM: $changed derived files changed with no corpus change. Committing nothing."
       derive_outcome="failed_nondeterminism"; overall_rc=1
@@ -92,6 +95,17 @@ echo "--- lex-articles: $derive_outcome"
 # ---- index rebuild + release for publishers whose corpus advanced tonight.
 # Runs after derive so lex-index/2 gets the fresh per-article layer (--articles);
 # without it the provisions/FTS tables are empty and search is dead.
+#
+# Reordering the stages was not enough: the queue is written from the INGEST outcome, so a
+# failed derive (clone failure, extractor error) still let a signed, valid, zero-provision
+# index reach the public repo by a different route. Publishing an index now REQUIRES a
+# derived layer that is known good.
+if [ "$derive_outcome" != "ran_committed" ] && [ "$derive_outcome" != "ran_no_change" ]; then
+  echo "SKIPPING INDEX: derive outcome is '$derive_outcome' — refusing to publish an index"
+  echo "built against an unverified derived layer."
+  rm -f .index-queue
+  overall_rc=1
+fi
 if [ -f .index-queue ]; then
   while read -r pub repo; do
     echo "=== index ($pub) ==="
