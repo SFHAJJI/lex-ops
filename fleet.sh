@@ -37,19 +37,9 @@ for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
         outcome="ran_no_change"
       fi
 
-      # Index rebuild + release only when the corpus advanced.
-      if [ "$outcome" = "ran_committed" ]; then
-        if dotnet run --project lex/src/Lex.Ingest -c Release -- index --corpus "$dir" \
-             --out "index-$pub.db" --keyfile signing-key.pem; then
-          tag="corpus-$(date -u +%F)"
-          gh release create "$tag" "index-$pub.db" --repo "$repo" \
-            --title "index-$pub $(date -u +%F)" \
-            --notes "Signed nightly index (schema lex-index/1). Free to download and use; redistribution of any build reserved (NOTICE layer 2)." \
-            || gh release upload "$tag" "index-$pub.db" --repo "$repo" --clobber || outcome="failed_release"
-        else
-          outcome="failed_index"; overall_rc=1
-        fi
-      fi
+      # Index rebuild happens AFTER the derive stage (lex-index/2 needs --articles;
+      # an index built without provisions has a dead search). Remember who advanced.
+      [ "$outcome" = "ran_committed" ] && echo "$pub $repo" >> .index-queue
     else
       outcome="failed_ingest"; overall_rc=1
     fi
@@ -98,6 +88,27 @@ fi
 jq -n --arg run "$STAMP" --arg outcome "$derive_outcome" \
   '{publisher:"lex-articles", run:$run, outcome:$outcome}' > "status/lex-articles.json"
 echo "--- lex-articles: $derive_outcome"
+
+# ---- index rebuild + release for publishers whose corpus advanced tonight.
+# Runs after derive so lex-index/2 gets the fresh per-article layer (--articles);
+# without it the provisions/FTS tables are empty and search is dead.
+if [ -f .index-queue ]; then
+  while read -r pub repo; do
+    echo "=== index ($pub) ==="
+    if dotnet run --project lex/src/Lex.Ingest -c Release -- index --corpus "corpus-$pub" \
+         --articles articles --out "index-$pub.db" --keyfile signing-key.pem; then
+      tag="corpus-$(date -u +%F)"
+      gh release create "$tag" "index-$pub.db" --repo "$repo" \
+        --title "index-$pub $(date -u +%F)" \
+        --notes "Signed nightly index (schema lex-index/2, provision-level search). Free to download and use; redistribution of any build reserved (NOTICE layer 2)." \
+        || gh release upload "$tag" "index-$pub.db" --repo "$repo" --clobber \
+        || { echo "--- $pub: failed_release"; overall_rc=1; }
+    else
+      echo "--- $pub: failed_index"; overall_rc=1
+    fi
+  done < .index-queue
+  rm -f .index-queue
+fi
 
 # ---- dataset release assets (lex-articles): JSONL.gz + parquet, only when derive committed.
 # All row fields are flat strings, so parquet schema inference is deterministic.
