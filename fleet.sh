@@ -106,6 +106,48 @@ if [ "$derive_outcome" != "ran_committed" ] && [ "$derive_outcome" != "ran_no_ch
   rm -f .index-queue
   overall_rc=1
 fi
+# A publisher whose CORPUS is quiet never reaches the queue above, so it never rebuilds its
+# index. That is a defect, not a saving: an index is a function of the corpus AND of the code
+# that builds it, so when a column is added to lex-index/2 a quiet publisher keeps serving the
+# old shape indefinitely.
+#
+# It bit on 2026-08-05. eu-eurlex had not moved since 2026-08-03, so its published index still
+# had 21 columns and lacked `profile`. IndexReader.Open correctly refused it, and the EU acts
+# vanished from the served corpus the moment the deploy started fetching published indexes
+# instead of a developer's local copy.
+#
+# A max-age rebuild is the cheap general answer: whatever changed, corpus or code or neither,
+# no published index is ever more than a week behind the builder that makes it.
+# Only when derive is known good. The block above deliberately empties the queue when it is
+# not, and re-queueing here would walk straight past that safety check.
+if [ "$derive_outcome" = "ran_committed" ] || [ "$derive_outcome" = "ran_no_change" ]; then
+  MAX_INDEX_AGE_DAYS="${MAX_INDEX_AGE_DAYS:-7}"
+  echo "=== stale-index check (max ${MAX_INDEX_AGE_DAYS}d) ==="
+  for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
+    repo=$(jq -r ".publishers[] | select(.id==\"$pub\") | .corpus_repo" publishers.json)
+    if [ -f .index-queue ] && grep -q "^$pub " .index-queue; then
+      echo "--- $pub: already queued"; continue
+    fi
+    # No corpus checkout means ingest failed tonight. Do not paper over that with a rebuild.
+    if [ ! -d "corpus-$pub" ]; then
+      echo "--- $pub: no corpus checkout, skipping"; continue
+    fi
+    published=$(gh release view --repo "$repo" --json publishedAt -q .publishedAt 2>/dev/null || true)
+    if [ -z "$published" ]; then
+      echo "--- $pub: no release yet, queueing"; echo "$pub $repo" >> .index-queue; continue
+    fi
+    age=$(( ( $(date -u +%s) - $(date -u -d "$published" +%s) ) / 86400 ))
+    if [ "$age" -ge "$MAX_INDEX_AGE_DAYS" ]; then
+      echo "--- $pub: published index is ${age}d old, queueing a refresh"
+      echo "$pub $repo" >> .index-queue
+    else
+      echo "--- $pub: published index is ${age}d old, fresh enough"
+    fi
+  done
+
+
+fi
+
 if [ -f .index-queue ]; then
   while read -r pub repo; do
     echo "=== index ($pub) ==="
