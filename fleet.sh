@@ -17,7 +17,14 @@ for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
   if git clone --depth 50 "https://x-access-token:${GH_TOKEN}@github.com/${repo}.git" "$dir"; then
     prev_works=$(jq -r '.works // 0' "$dir/manifest.json" 2>/dev/null || echo 0)
 
-    if dotnet run --project lex/src/Lex.Ingest -c Release -- ingest --publisher "$pub" --corpus "$dir"; then
+    # Verify the committed evidence immediately after a fresh checkout. Ingestion must never
+    # spend publisher requests on a base whose Git blobs no longer match their recorded hashes.
+    # The post-ingest verifier below remains the publication gate for newly acquired bytes.
+    if ! dotnet run --project lex/src/Lex.Ingest -c Release -- verify corpus --corpus "$dir"; then
+      echo "INTEGRITY: checked-out corpus evidence is invalid. Ingesting and committing nothing."
+      outcome="failed_base_integrity"
+      overall_rc=1
+    elif dotnet run --project lex/src/Lex.Ingest -c Release -- ingest --publisher "$pub" --corpus "$dir"; then
       new_works=$(jq -r '.works // 0' "$dir/manifest.json" 2>/dev/null || echo 0)
       works="$new_works"
 
