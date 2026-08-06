@@ -162,6 +162,22 @@ if [ "$derive_outcome" = "ran_committed" ] || [ "$derive_outcome" = "ran_no_chan
 fi
 
 if [ -f .index-queue ]; then
+  # The evidence verifier and derivation have already consumed publisher bodies. IndexFromCorpus
+  # reads only manifest/meta records plus the verified derived layer, so keeping duplicate XML,
+  # HTML, PDF and Formex working-tree bytes during index/vector construction only exhausts the
+  # ephemeral runner disk. Delete them from these throwaway clones, never from the source repos.
+  # Git metadata stays mounted so corpus_commit remains provable in the artifact manifest.
+  echo "=== reclaim ephemeral evidence working-tree space ==="
+  for corpus_dir in corpus-*; do
+    [ -d "$corpus_dir/works" ] || continue
+    find "$corpus_dir/works" -type f ! -name meta.json -delete
+    find "$corpus_dir/works" -depth -type d -empty -delete
+  done
+  # The article commit, if any, was already pushed. Indexing and dataset export need its files,
+  # not a second copy of their history in this disposable checkout.
+  rm -rf articles/.git
+  df -h .
+
   published_artifacts=0
   lex_code_commit=$(git -C lex rev-parse HEAD)
 
