@@ -1,6 +1,6 @@
 {
   "publisher": "lu-legilux",
-  "run": "2026-08-06T14:06:34Z",
-  "outcome": "ran_committed",
+  "run": "2026-08-06T22:11:48Z",
+  "outcome": "failed_integrity",
   "works": 1399
 }
