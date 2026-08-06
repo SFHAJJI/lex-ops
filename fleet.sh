@@ -213,8 +213,9 @@ if [ -f .index-queue ]; then
              --source "collection=$pub" --source "corpus_commit=$corpus_commit"; then
           echo "--- $pub: failed_manifest"; overall_rc=1; continue
         fi
-        digest=$(openssl dgst -sha256 -binary "$manifest" | openssl base64 -A \
-          | tr '+/' '-_' | tr -d '=')
+        # Azure CLI accepts the digest as padded standard base64. Its signature result is
+        # base64url, which Lex's verifier accepts explicitly.
+        digest=$(openssl dgst -sha256 -binary "$manifest" | openssl base64 -A)
         if ! az keyvault key sign --vault-name "$AZURE_KEY_VAULT" --name "$AZURE_KEY_NAME" \
              --algorithm ES256 --digest "$digest" --query result -o tsv > "$signature"; then
           echo "--- $pub: failed_key_vault_sign"; overall_rc=1; continue
@@ -255,8 +256,7 @@ if [ -f .index-queue ]; then
                --source "index_manifest_sha256=$manifest_id"; then
             echo "--- $pub: failed_benchmark_manifest"; overall_rc=1; continue
           fi
-          benchmark_digest=$(openssl dgst -sha256 -binary "$benchmark_manifest" | openssl base64 -A \
-            | tr '+/' '-_' | tr -d '=')
+          benchmark_digest=$(openssl dgst -sha256 -binary "$benchmark_manifest" | openssl base64 -A)
           if ! az keyvault key sign --vault-name "$AZURE_KEY_VAULT" --name "$AZURE_KEY_NAME" \
                --algorithm ES256 --digest "$benchmark_digest" --query result -o tsv \
                > "$benchmark_signature"; then

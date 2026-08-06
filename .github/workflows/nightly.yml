@@ -37,6 +37,25 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
 
+      - name: verify Key Vault signing path
+        if: vars.ARTIFACT_SIGNING_MODE == 'keyvault'
+        shell: bash
+        env:
+          AZURE_KEY_VAULT: ${{ vars.AZURE_KEY_VAULT }}
+          AZURE_KEY_NAME: ${{ vars.AZURE_KEY_NAME }}
+        run: |
+          set -eu
+          : "${AZURE_KEY_VAULT:?AZURE_KEY_VAULT is required}"
+          : "${AZURE_KEY_NAME:?AZURE_KEY_NAME is required}"
+          digest=$(printf '%s' 'lex-keyvault-signing-preflight/1' \
+            | openssl dgst -sha256 -binary | openssl base64 -A)
+          signature=$(az keyvault key sign --vault-name "$AZURE_KEY_VAULT" \
+            --name "$AZURE_KEY_NAME" --algorithm ES256 --digest "$digest" \
+            --query result -o tsv)
+          az keyvault key verify --vault-name "$AZURE_KEY_VAULT" \
+            --name "$AZURE_KEY_NAME" --algorithm ES256 --digest "$digest" \
+            --signature "$signature" --query value -o tsv | grep -qx true
+
       - name: run fleet
         env:
           GH_TOKEN: ${{ secrets.LEX_OPS_TOKEN }}
