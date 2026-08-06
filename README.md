@@ -41,6 +41,8 @@ revision remains available for immediate rollback.
 During the dual-reader rollback window, `LEX_SIGNING_KEY` still signs only the index's embedded
 compatibility stamp. The application does not trust that adjacent public key. Runtime trust comes
 from the whole-release Key Vault signature and the public-key fingerprint pinned in the Lex image.
+The legacy secret is eligible for removal only after 30 stable production days, no earlier than
+2026-09-05, and only after the retained rollback revision no longer needs it.
 
 When the fleet grows past a couple of publishers, this migrates to the
 dispatch/fan-out shape in spec §10.1 — per-corpus-repo workflows triggered via
