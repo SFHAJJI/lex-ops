@@ -51,7 +51,7 @@ jobs:
             | openssl dgst -sha256 -binary | openssl base64 -A)
           signature=$(az keyvault key sign --vault-name "$AZURE_KEY_VAULT" \
             --name "$AZURE_KEY_NAME" --algorithm ES256 --digest "$digest" \
-            --query result -o tsv)
+            --query value -o tsv)
           az keyvault key verify --vault-name "$AZURE_KEY_VAULT" \
             --name "$AZURE_KEY_NAME" --algorithm ES256 --digest "$digest" \
             --signature "$signature" --query value -o tsv | grep -qx true

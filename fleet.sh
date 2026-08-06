@@ -239,7 +239,7 @@ if [ -f .index-queue ]; then
         # base64url, which Lex's verifier accepts explicitly.
         digest=$(openssl dgst -sha256 -binary "$manifest" | openssl base64 -A)
         if ! az keyvault key sign --vault-name "$AZURE_KEY_VAULT" --name "$AZURE_KEY_NAME" \
-             --algorithm ES256 --digest "$digest" --query result -o tsv > "$signature"; then
+             --algorithm ES256 --digest "$digest" --query value -o tsv > "$signature"; then
           echo "--- $pub: failed_key_vault_sign"; overall_rc=1; continue
         fi
       elif ! dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
@@ -280,7 +280,7 @@ if [ -f .index-queue ]; then
           fi
           benchmark_digest=$(openssl dgst -sha256 -binary "$benchmark_manifest" | openssl base64 -A)
           if ! az keyvault key sign --vault-name "$AZURE_KEY_VAULT" --name "$AZURE_KEY_NAME" \
-               --algorithm ES256 --digest "$benchmark_digest" --query result -o tsv \
+               --algorithm ES256 --digest "$benchmark_digest" --query value -o tsv \
                > "$benchmark_signature"; then
             echo "--- $pub: failed_benchmark_key_vault_sign"; overall_rc=1; continue
           fi
