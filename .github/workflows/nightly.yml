@@ -24,8 +24,7 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
-      - name: restore signing key
-        if: vars.ARTIFACT_SIGNING_MODE != 'keyvault'
+      - name: restore legacy embedded-stamp key
         env:
           LEX_SIGNING_KEY: ${{ secrets.LEX_SIGNING_KEY }}
         run: printf '%s' "$LEX_SIGNING_KEY" > signing-key.pem
