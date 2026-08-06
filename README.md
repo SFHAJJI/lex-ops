@@ -15,6 +15,17 @@ night, never a heartbeat in a corpus repo.
   whichever comes first**, spec §11.1), `LEX_SIGNING_KEY` (the D40 index
   signing key, ECDSA-P256).
 
+Every published index now travels with a signed `lex-artifacts/1` manifest. The manifest binds
+the complete release file list, hashes, sizes, code commit and corpus commit to the public key
+pinned in the Lex application release. The pipeline verifies its own output before upload.
+
+`DEPLOY_AFTER_PUBLISH=1` dispatches the verified Lex deployment workflow. It stays unset until
+the production GitHub OIDC environment and managed identities exist. The existing signing secret
+is the migration root. After the Key Vault public root has shipped in Lex, set
+`ARTIFACT_SIGNING_MODE=keyvault`, `ARTIFACT_KEY_ID`, `AZURE_KEY_VAULT`, `AZURE_KEY_NAME` and the
+three Azure OIDC variables. The nightly job then asks Key Vault to sign the manifest digest; the
+private key is non-exportable and never enters the runner.
+
 When the fleet grows past a couple of publishers, this migrates to the
 dispatch/fan-out shape in spec §10.1 — per-corpus-repo workflows triggered via
 `workflow_dispatch`, status via run artifacts. The status model and gates stay
