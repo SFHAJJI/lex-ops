@@ -158,13 +158,20 @@ if [ -f .index-queue ]; then
       corpus_commit=$(git -C "corpus-$pub" rev-parse HEAD)
       manifest="index-$pub.manifest.json"
       signature="index-$pub.manifest.sig"
+      artifact_files=(--file "index-$pub.db")
+      release_assets=("index-$pub.db")
+      if [ "$pub" = "eu-eurlex" ]; then
+        cp lex/src/Lex.Sources.EurLex/eu-scope.json eu-scope.json
+        artifact_files+=(--file eu-scope.json)
+        release_assets+=(eu-scope.json)
+      fi
       signing_mode="${ARTIFACT_SIGNING_MODE:-legacy}"
       if [ "$signing_mode" = "keyvault" ]; then
         : "${AZURE_KEY_VAULT:?AZURE_KEY_VAULT is required for Key Vault signing}"
         : "${AZURE_KEY_NAME:?AZURE_KEY_NAME is required for Key Vault signing}"
         : "${ARTIFACT_KEY_ID:?ARTIFACT_KEY_ID is required for Key Vault signing}"
         if ! dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
-             --root . --file "index-$pub.db" --manifest "$manifest" \
+             --root . "${artifact_files[@]}" --manifest "$manifest" \
              --key-id "$ARTIFACT_KEY_ID" --code-commit "$lex_code_commit" \
              --source "collection=$pub" --source "corpus_commit=$corpus_commit"; then
           echo "--- $pub: failed_manifest"; overall_rc=1; continue
@@ -176,7 +183,7 @@ if [ -f .index-queue ]; then
           echo "--- $pub: failed_key_vault_sign"; overall_rc=1; continue
         fi
       elif ! dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
-           --root . --file "index-$pub.db" --manifest "$manifest" --signature "$signature" \
+           --root . "${artifact_files[@]}" --manifest "$manifest" --signature "$signature" \
            --keyfile signing-key.pem --key-id legacy-index-2026 --code-commit "$lex_code_commit" \
            --source "collection=$pub" --source "corpus_commit=$corpus_commit"; then
         echo "--- $pub: failed_manifest"; overall_rc=1; continue
@@ -187,10 +194,11 @@ if [ -f .index-queue ]; then
         echo "--- $pub: failed_manifest_verify"; overall_rc=1; continue
       fi
       tag="corpus-$(date -u +%F)"
-      if gh release create "$tag" "index-$pub.db" "$manifest" "$signature" --repo "$repo" \
+      release_assets+=("$manifest" "$signature")
+      if gh release create "$tag" "${release_assets[@]}" --repo "$repo" \
            --title "index-$pub $(date -u +%F)" \
            --notes "Signed index and whole-release manifest. Verify against the public key pinned by Lex before use. Free to download and use; redistribution of any build reserved (NOTICE layer 2)." \
-         || gh release upload "$tag" "index-$pub.db" "$manifest" "$signature" --repo "$repo" --clobber; then
+         || gh release upload "$tag" "${release_assets[@]}" --repo "$repo" --clobber; then
         published_artifacts=1
       else
         echo "--- $pub: failed_release"

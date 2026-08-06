@@ -18,6 +18,9 @@ night, never a heartbeat in a corpus repo.
 Every published index now travels with a signed `lex-artifacts/1` manifest. The manifest binds
 the complete release file list, hashes, sizes, code commit and corpus commit to the public key
 pinned in the Lex application release. The pipeline verifies its own output before upload.
+EU releases also carry the exact reviewed `eu-scope.json` that selected their works. It is a
+signed artifact, so a reviewer can reproduce which domains, languages, waves and relationship
+rules produced a particular index.
 
 `DEPLOY_AFTER_PUBLISH=1` dispatches the verified Lex deployment workflow. It stays unset until
 the production GitHub OIDC environment and managed identities exist. The existing signing secret
