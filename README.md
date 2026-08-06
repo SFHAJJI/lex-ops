@@ -28,7 +28,9 @@ rules produced a particular index.
 Production publication uses `ARTIFACT_SIGNING_MODE=keyvault`. GitHub Actions authenticates through
 the production OIDC environment, and Azure Key Vault signs each canonical manifest with the
 non-exportable P-256 key. The private key never enters the runner. The publisher identity has only
-the Key Vault data-plane permission required to sign and no subscription role.
+the Key Vault `Get`, `Sign` and `Verify` permissions and no subscription role. Immediately after
+OIDC login, the workflow signs and verifies a fixed test digest so authorization or digest-encoding
+drift fails before the long fleet run begins.
 
 `DEPLOY_AFTER_PUBLISH=1` dispatches the Lex deployment workflow only after at least one artifact
 set was built, signed, verified and uploaded successfully. The deployment builds an immutable
