@@ -53,9 +53,12 @@ jobs:
             --name "$AZURE_KEY_NAME" --algorithm ES256 --digest "$digest" -o json \
             | jq -er 'if type == "string" then . else (.signature // .value // .result) end')
           test -n "$signature"
-          az keyvault key verify --vault-name "$AZURE_KEY_VAULT" \
+          verification=$(az keyvault key verify --vault-name "$AZURE_KEY_VAULT" \
             --name "$AZURE_KEY_NAME" --algorithm ES256 --digest "$digest" \
-            --signature "$signature" --query value -o tsv | grep -qix true
+            --signature "$signature" -o json)
+          printf '%s' "$verification" | jq -e \
+            '(if type == "boolean" then . elif type == "string" then (ascii_downcase == "true") else (.value // .valid // .isValid // .is_valid // false) end) == true' \
+            >/dev/null
 
       - name: run fleet
         env:
