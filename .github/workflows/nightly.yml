@@ -55,7 +55,7 @@ jobs:
           test -n "$signature"
           az keyvault key verify --vault-name "$AZURE_KEY_VAULT" \
             --name "$AZURE_KEY_NAME" --algorithm ES256 --digest "$digest" \
-            --signature "$signature" --query value -o tsv | grep -qx true
+            --signature "$signature" --query value -o tsv | grep -qix true
 
       - name: run fleet
         env:
