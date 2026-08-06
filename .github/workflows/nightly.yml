@@ -50,8 +50,9 @@ jobs:
           digest=$(printf '%s' 'lex-keyvault-signing-preflight/1' \
             | openssl dgst -sha256 -binary | openssl base64 -A)
           signature=$(az keyvault key sign --vault-name "$AZURE_KEY_VAULT" \
-            --name "$AZURE_KEY_NAME" --algorithm ES256 --digest "$digest" \
-            --query value -o tsv)
+            --name "$AZURE_KEY_NAME" --algorithm ES256 --digest "$digest" -o json \
+            | jq -er 'if type == "string" then . else (.signature // .value // .result) end')
+          test -n "$signature"
           az keyvault key verify --vault-name "$AZURE_KEY_VAULT" \
             --name "$AZURE_KEY_NAME" --algorithm ES256 --digest "$digest" \
             --signature "$signature" --query value -o tsv | grep -qx true
