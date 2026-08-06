@@ -21,8 +21,14 @@ for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
       new_works=$(jq -r '.works // 0' "$dir/manifest.json" 2>/dev/null || echo 0)
       works="$new_works"
 
+      # Recompute record and observation hashes before either derivation or commit.
+      # This also rejects orphaned version directories and manifest/filesystem drift.
+      if ! dotnet run --project lex/src/Lex.Ingest -c Release -- verify corpus --corpus "$dir"; then
+        echo "INTEGRITY: corpus evidence verification failed. Committing nothing."
+        outcome="failed_integrity"
+        overall_rc=1
       # Pre-commit anomaly gate: a partial upstream response must not write history.
-      if [ "$prev_works" -gt 0 ] && [ "$new_works" -lt $((prev_works * 95 / 100)) ]; then
+      elif [ "$prev_works" -gt 0 ] && [ "$new_works" -lt $((prev_works * 95 / 100)) ]; then
         echo "ANOMALY: works $prev_works -> $new_works (>5% drop). Committing nothing."
         git -C "$dir" checkout -- . || true
         outcome="failed_anomaly"
