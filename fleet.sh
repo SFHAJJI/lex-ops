@@ -149,21 +149,68 @@ if [ "$derive_outcome" = "ran_committed" ] || [ "$derive_outcome" = "ran_no_chan
 fi
 
 if [ -f .index-queue ]; then
+  published_artifacts=0
+  lex_code_commit=$(git -C lex rev-parse HEAD)
   while read -r pub repo; do
     echo "=== index ($pub) ==="
     if dotnet run --project lex/src/Lex.Ingest -c Release -- index --corpus "corpus-$pub" \
          --articles articles --out "index-$pub.db" --keyfile signing-key.pem; then
+      corpus_commit=$(git -C "corpus-$pub" rev-parse HEAD)
+      manifest="index-$pub.manifest.json"
+      signature="index-$pub.manifest.sig"
+      signing_mode="${ARTIFACT_SIGNING_MODE:-legacy}"
+      if [ "$signing_mode" = "keyvault" ]; then
+        : "${AZURE_KEY_VAULT:?AZURE_KEY_VAULT is required for Key Vault signing}"
+        : "${AZURE_KEY_NAME:?AZURE_KEY_NAME is required for Key Vault signing}"
+        : "${ARTIFACT_KEY_ID:?ARTIFACT_KEY_ID is required for Key Vault signing}"
+        if ! dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
+             --root . --file "index-$pub.db" --manifest "$manifest" \
+             --key-id "$ARTIFACT_KEY_ID" --code-commit "$lex_code_commit" \
+             --source "collection=$pub" --source "corpus_commit=$corpus_commit"; then
+          echo "--- $pub: failed_manifest"; overall_rc=1; continue
+        fi
+        digest=$(openssl dgst -sha256 -binary "$manifest" | openssl base64 -A \
+          | tr '+/' '-_' | tr -d '=')
+        if ! az keyvault key sign --vault-name "$AZURE_KEY_VAULT" --name "$AZURE_KEY_NAME" \
+             --algorithm ES256 --digest "$digest" --query result -o tsv > "$signature"; then
+          echo "--- $pub: failed_key_vault_sign"; overall_rc=1; continue
+        fi
+      elif ! dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
+           --root . --file "index-$pub.db" --manifest "$manifest" --signature "$signature" \
+           --keyfile signing-key.pem --key-id legacy-index-2026 --code-commit "$lex_code_commit" \
+           --source "collection=$pub" --source "corpus_commit=$corpus_commit"; then
+        echo "--- $pub: failed_manifest"; overall_rc=1; continue
+      fi
+      if ! dotnet run --project lex/src/Lex.Ingest -c Release -- artifact verify \
+           --root . --manifest "$manifest" --signature "$signature" \
+           --trust-roots lex/deploy/trusted-artifact-roots.json; then
+        echo "--- $pub: failed_manifest_verify"; overall_rc=1; continue
+      fi
       tag="corpus-$(date -u +%F)"
-      gh release create "$tag" "index-$pub.db" --repo "$repo" \
-        --title "index-$pub $(date -u +%F)" \
-        --notes "Signed nightly index (schema lex-index/2, provision-level search). Free to download and use; redistribution of any build reserved (NOTICE layer 2)." \
-        || gh release upload "$tag" "index-$pub.db" --repo "$repo" --clobber \
-        || { echo "--- $pub: failed_release"; overall_rc=1; }
+      if gh release create "$tag" "index-$pub.db" "$manifest" "$signature" --repo "$repo" \
+           --title "index-$pub $(date -u +%F)" \
+           --notes "Signed index and whole-release manifest. Verify against the public key pinned by Lex before use. Free to download and use; redistribution of any build reserved (NOTICE layer 2)." \
+         || gh release upload "$tag" "index-$pub.db" "$manifest" "$signature" --repo "$repo" --clobber; then
+        published_artifacts=1
+      else
+        echo "--- $pub: failed_release"
+        overall_rc=1
+      fi
     else
       echo "--- $pub: failed_index"; overall_rc=1
     fi
   done < .index-queue
   rm -f .index-queue
+
+  # Deployment remains explicitly gated during the migration. Once the Lex production OIDC
+  # environment exists, setting this repository variable to 1 turns a verified publication into
+  # an immutable image and candidate revision instead of leaving production one release behind.
+  if [ "$published_artifacts" = "1" ] && [ "${DEPLOY_AFTER_PUBLISH:-0}" = "1" ]; then
+    gh api repos/SFHAJJI/lex/dispatches -X POST \
+      -f event_type=verified_artifact_release \
+      -F 'client_payload[require_manifest]=true' \
+      || { echo "--- deploy dispatch failed"; overall_rc=1; }
+  fi
 fi
 
 # ---- dataset release assets (lex-articles): JSONL.gz + parquet, only when derive committed.

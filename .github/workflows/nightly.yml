@@ -7,6 +7,7 @@ on:
 permissions:
   contents: write
   issues: write
+  id-token: write
 
 jobs:
   fleet:
@@ -24,13 +25,27 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: restore signing key
+        if: vars.ARTIFACT_SIGNING_MODE != 'keyvault'
         env:
           LEX_SIGNING_KEY: ${{ secrets.LEX_SIGNING_KEY }}
         run: printf '%s' "$LEX_SIGNING_KEY" > signing-key.pem
 
+      - name: Azure login for non-exportable signing
+        if: vars.ARTIFACT_SIGNING_MODE == 'keyvault'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
       - name: run fleet
         env:
           GH_TOKEN: ${{ secrets.LEX_OPS_TOKEN }}
+          DEPLOY_AFTER_PUBLISH: ${{ vars.DEPLOY_AFTER_PUBLISH }}
+          ARTIFACT_SIGNING_MODE: ${{ vars.ARTIFACT_SIGNING_MODE }}
+          ARTIFACT_KEY_ID: ${{ vars.ARTIFACT_KEY_ID }}
+          AZURE_KEY_VAULT: ${{ vars.AZURE_KEY_VAULT }}
+          AZURE_KEY_NAME: ${{ vars.AZURE_KEY_NAME }}
         run: bash fleet.sh
 
       - name: commit status (one commit per night, never into corpus repos)
