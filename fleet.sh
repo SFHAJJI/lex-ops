@@ -136,6 +136,13 @@ if [ "$derive_outcome" = "ran_committed" ] || [ "$derive_outcome" = "ran_no_chan
     if [ -z "$published" ]; then
       echo "--- $pub: no release yet, queueing"; echo "$pub $repo" >> .index-queue; continue
     fi
+    manifest="index-$pub.manifest.json"
+    if ! gh release view --repo "$repo" --json assets -q '.assets[].name' 2>/dev/null \
+         | grep -Fxq "$manifest"; then
+      echo "--- $pub: release has no signed artifact manifest, queueing migration refresh"
+      echo "$pub $repo" >> .index-queue
+      continue
+    fi
     age=$(( ( $(date -u +%s) - $(date -u -d "$published" +%s) ) / 86400 ))
     if [ "$age" -ge "$MAX_INDEX_AGE_DAYS" ]; then
       echo "--- $pub: published index is ${age}d old, queueing a refresh"
