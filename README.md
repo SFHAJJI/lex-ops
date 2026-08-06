@@ -26,8 +26,9 @@ rules produced a particular index.
 the production GitHub OIDC environment and managed identities exist. The existing signing secret
 is the migration root. After the Key Vault public root has shipped in Lex, set
 `ARTIFACT_SIGNING_MODE=keyvault`, `ARTIFACT_KEY_ID`, `AZURE_KEY_VAULT`, `AZURE_KEY_NAME` and the
-three Azure OIDC variables. The nightly job then asks Key Vault to sign the manifest digest; the
-private key is non-exportable and never enters the runner.
+Azure tenant and client OIDC variables. The publisher login is data-plane-only and receives no
+subscription role. The nightly job asks Key Vault to sign the manifest digest; the private key is
+non-exportable and never enters the runner.
 
 During the dual-reader rollback window, `LEX_SIGNING_KEY` still signs only the index's embedded
 compatibility stamp. The application does not trust that adjacent public key. Runtime trust comes
