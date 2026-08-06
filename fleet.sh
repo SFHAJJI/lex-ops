@@ -73,6 +73,11 @@ derive_outcome="failed"
 if git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/SFHAJJI/lex-articles.git" articles; then
   derive_ok=1
   for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
+    publisher_outcome=$(jq -r '.outcome // "failed"' "status/$pub.json" 2>/dev/null || echo failed)
+    case "$publisher_outcome" in
+      ran_committed|ran_no_change) ;;
+      *) echo "--- derive $pub: skipped because ingest outcome is $publisher_outcome"; continue ;;
+    esac
     [ -d "corpus-$pub" ] || continue
     dotnet run --project lex/src/Lex.Ingest -c Release -- derive --publisher "$pub" --corpus "corpus-$pub" --out articles || derive_ok=0
   done
@@ -138,6 +143,11 @@ if [ "$derive_outcome" = "ran_committed" ] || [ "$derive_outcome" = "ran_no_chan
   echo "=== stale-index check (max ${MAX_INDEX_AGE_DAYS}d) ==="
   for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
     repo=$(jq -r ".publishers[] | select(.id==\"$pub\") | .corpus_repo" publishers.json)
+    publisher_outcome=$(jq -r '.outcome // "failed"' "status/$pub.json" 2>/dev/null || echo failed)
+    case "$publisher_outcome" in
+      ran_committed|ran_no_change) ;;
+      *) echo "--- $pub: ingest outcome is $publisher_outcome, refusing index refresh"; continue ;;
+    esac
     if [ -f .index-queue ] && grep -q "^$pub " .index-queue; then
       echo "--- $pub: already queued"; continue
     fi
