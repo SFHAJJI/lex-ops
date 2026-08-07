@@ -6,6 +6,14 @@ set -uo pipefail
 STAMP="$(date -u +%FT%TZ)"
 mkdir -p status
 overall_rc=0
+FORCE_INDEX_PUBLISHER="${FORCE_INDEX_PUBLISHER:-}"
+
+if [ -n "$FORCE_INDEX_PUBLISHER" ] \
+   && ! jq -e --arg pub "$FORCE_INDEX_PUBLISHER" \
+        '.publishers[] | select(.enabled and .id == $pub)' publishers.json >/dev/null; then
+  echo "ERROR: FORCE_INDEX_PUBLISHER '$FORCE_INDEX_PUBLISHER' is not an enabled publisher"
+  exit 2
+fi
 
 for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
   repo=$(jq -r ".publishers[] | select(.id==\"$pub\") | .corpus_repo" publishers.json)
@@ -185,6 +193,30 @@ if [ "$derive_outcome" = "ran_committed" ] || [ "$derive_outcome" = "ran_no_chan
       echo "--- $pub: published index is ${age}d old, fresh enough"
     fi
   done
+
+  # Recovery runs may need to repeat an index build after the runner timed out even though
+  # ingestion and derivation were already committed successfully. Scope that override to one
+  # reviewed registry entry; never turn it into an unbounded rebuild of every publisher.
+  if [ -n "$FORCE_INDEX_PUBLISHER" ]; then
+    forced_repo=$(jq -r --arg pub "$FORCE_INDEX_PUBLISHER" \
+      '.publishers[] | select(.enabled and .id == $pub) | .corpus_repo' publishers.json)
+    forced_outcome=$(jq -r '.outcome // "failed"' "status/$FORCE_INDEX_PUBLISHER.json" \
+      2>/dev/null || echo failed)
+    case "$forced_outcome" in
+      ran_committed|ran_no_change)
+        if [ -f .index-queue ] && grep -q "^$FORCE_INDEX_PUBLISHER " .index-queue; then
+          echo "--- $FORCE_INDEX_PUBLISHER: forced recovery already queued"
+        else
+          echo "--- $FORCE_INDEX_PUBLISHER: queueing explicit recovery index"
+          echo "$FORCE_INDEX_PUBLISHER $forced_repo" >> .index-queue
+        fi
+        ;;
+      *)
+        echo "--- $FORCE_INDEX_PUBLISHER: ingest outcome is $forced_outcome, refusing forced recovery"
+        overall_rc=1
+        ;;
+    esac
+  fi
 
 
 fi

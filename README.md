@@ -11,6 +11,12 @@ Workflow concurrency is serialized without preemption. If a manual recovery run 
 02:17 schedule, the scheduled run waits rather than racing the active publisher, article, release,
 or status writers. The active run is never canceled merely because a newer trigger arrived.
 
+If an index build is interrupted after corpus and article commits land, dispatch the workflow with
+`force_index_publisher` set to that enabled publisher id (for example, `eu-eurlex`). Fleet still
+verifies and derives the committed inputs, but queues only that publisher's index when ingestion is
+unchanged. Invalid or disabled ids fail before cloning, and a failed publisher ingest cannot be
+forced past the publication gates.
+
 - `publishers.json` — the fleet registry.
 - `fleet.sh` — the runner.
 - `status/` — per-publisher status records (the freshness feed).
