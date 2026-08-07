@@ -66,8 +66,10 @@ for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
 done
 
 # ---- derived consumption layer (lex-articles): regenerate, guard, push (§ blueprint inc 4).
-# Determinism guard: derived files may only change when a corpus changed — a diff without
-# any corpus commit means extractor nondeterminism or profile drift, and commits nothing.
+# Determinism guard: generation.json records the exact corpus heads and the content fingerprint
+# of the versioned extractor. Derived files may change only when that input identity changes.
+# This permits a retry after corpus publication or an intentional new extraction profile, while
+# an output diff from identical inputs remains a hard nondeterminism failure.
 echo "=== derive (lex-articles) ==="
 derive_outcome="failed"
 if git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/SFHAJJI/lex-articles.git" articles; then
@@ -83,18 +85,27 @@ if git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/SFHAJJI/le
   done
   [ "$derive_ok" = 1 ] && { dotnet run --project lex/src/Lex.Ingest -c Release -- catalog --articles articles || derive_ok=0; }
   if [ "$derive_ok" = 1 ]; then
+    deriver_fingerprint=$(git -C lex rev-parse HEAD:src/Lex.Derive)
+    generation=$(jq -n --arg fingerprint "$deriver_fingerprint" \
+      '{schema:"lex-articles-generation/1", deriver_fingerprint:$fingerprint, corpus_commits:{}}')
+    for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
+      [ -d "corpus-$pub/.git" ] || continue
+      corpus_commit=$(git -C "corpus-$pub" rev-parse HEAD)
+      generation=$(jq --arg pub "$pub" --arg commit "$corpus_commit" \
+        '.corpus_commits[$pub] = $commit' <<<"$generation")
+    done
+    printf '%s\n' "$generation" > articles/generation.json
+
     changed=$(git -C articles status --porcelain | wc -l)
-    # grep -c over MULTIPLE files prints "path:count" per file, not a total — the old form
-    # produced a multi-line string, the integer test below errored, and the guard fell
-    # through to committing. It had never once fired. Count matching FILES instead.
-    committed=$(grep -l '"outcome": *"ran_committed"' status/*.json 2>/dev/null | wc -l)
-    if [ "$changed" -gt 0 ] && [ "${committed:-0}" -eq 0 ]; then
-      echo "DERIVE NONDETERMINISM: $changed derived files changed with no corpus change. Committing nothing."
+    input_changed=0
+    [ -n "$(git -C articles status --porcelain -- generation.json)" ] && input_changed=1
+    if [ "$changed" -gt 0 ] && [ "$input_changed" -eq 0 ]; then
+      echo "DERIVE NONDETERMINISM: $changed derived files changed from identical recorded inputs. Committing nothing."
       derive_outcome="failed_nondeterminism"; overall_rc=1
     elif [ "$changed" -gt 0 ]; then
       git -C articles config user.name "lex-ops"
       git -C articles config user.email "haji.soufien@gmail.com"
-      git -C articles add catalog.json lu-legilux eu-eurlex 2>/dev/null
+      git -C articles add generation.json catalog.json lu-legilux eu-eurlex 2>/dev/null
       git -C articles commit -m "nightly derive $STAMP" && git -C articles push \
         && derive_outcome="ran_committed" || { derive_outcome="failed_push"; overall_rc=1; }
     else
