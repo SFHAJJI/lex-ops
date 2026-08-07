@@ -38,6 +38,15 @@ EU releases also carry the exact reviewed `eu-scope.json` that selected their wo
 signed artifact, so a reviewer can reproduce which domains, languages, waves and relationship
 rules produced a particular index.
 
+Key-Vault-signed releases are written first to the private `stlexindexes/lex` Blob container under
+`releases/<publisher>/<manifest-sha256>/`. Only after every versioned asset upload succeeds does
+Fleet replace `current/<publisher>.json`. The pointer is only discovery metadata: the application
+still verifies the externally pinned signature and every manifest hash before serving anything.
+GitHub Releases remains a public mirror while every individual asset is at most 2 GiB. If an asset
+crosses that platform limit, Blob remains canonical and Container App image deployment is blocked
+until the measured VM/local-disk path is active; Fleet never deploys a mixture of old and new
+publisher releases.
+
 The derived `lex-articles` repository carries `generation.json`, which records every enabled
 corpus head and the Git tree fingerprint of `src/Lex.Derive`. Fleet accepts derived changes only
 when that deterministic input identity changes. This allows a failed run to resume after corpus

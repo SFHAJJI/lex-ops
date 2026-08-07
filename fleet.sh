@@ -8,6 +8,42 @@ mkdir -p status
 overall_rc=0
 FORCE_INDEX_PUBLISHER="${FORCE_INDEX_PUBLISHER:-}"
 
+publish_blob_release() {
+  local pub="$1" manifest_id="$2" corpus_commit="$3"
+  shift 3
+  local account="${AZURE_INDEX_STORAGE_ACCOUNT:?AZURE_INDEX_STORAGE_ACCOUNT is required}"
+  local prefix="releases/$pub/$manifest_id" asset pointer blob_name sha size remote
+  for asset in "$@"; do
+    blob_name="$prefix/$(basename "$asset")"
+    sha=$(sha256sum "$asset" | cut -d' ' -f1)
+    size=$(stat -c %s "$asset")
+    remote=$(az storage blob show --auth-mode login --only-show-errors \
+      --account-name "$account" --container-name lex --name "$blob_name" \
+      --query '[properties.contentLength,metadata.sha256]' -o tsv 2>/dev/null || true)
+    if [ -n "$remote" ]; then
+      [ "$remote" = "$size"$'\t'"$sha" ] || {
+        echo "ERROR: immutable Blob path $blob_name already has different bytes" >&2
+        return 1
+      }
+      continue
+    fi
+    az storage blob upload --auth-mode login --only-show-errors --overwrite false \
+      --account-name "$account" --container-name lex --name "$blob_name" \
+      --metadata "sha256=$sha" --file "$asset" >/dev/null || return 1
+  done
+  pointer=$(mktemp)
+  jq -n --arg pub "$pub" --arg manifest "$manifest_id" --arg prefix "$prefix" \
+    --arg corpus "$corpus_commit" --arg published "$STAMP" \
+    '{schema:"lex-artifact-pointer/1",collection:$pub,manifest_sha256:$manifest,
+      prefix:$prefix,corpus_commit:$corpus,published_at:$published}' > "$pointer"
+  az storage blob upload --auth-mode login --only-show-errors --overwrite true \
+    --account-name "$account" --container-name lex --name "current/$pub.json" \
+    --file "$pointer" >/dev/null
+  local rc=$?
+  rm -f "$pointer"
+  return "$rc"
+}
+
 if [ -n "$FORCE_INDEX_PUBLISHER" ] \
    && ! jq -e --arg pub "$FORCE_INDEX_PUBLISHER" \
         '.publishers[] | select(.enabled and .id == $pub)' publishers.json >/dev/null; then
@@ -249,6 +285,7 @@ if [ -f .index-queue ]; then
   df -h .
 
   published_artifacts=0
+  deployment_blocked=0
   lex_code_commit=$(git -C lex rev-parse HEAD)
 
   # The encoder is a release artifact, not an unpinned package download at runtime. Resolve the
@@ -325,9 +362,9 @@ if [ -f .index-queue ]; then
            --trust-roots lex/deploy/trusted-artifact-roots.json; then
         echo "--- $pub: failed_manifest_verify"; overall_rc=1; continue
       fi
+      manifest_id=$(sha256sum "$manifest" | cut -d' ' -f1)
       if [ "$pub" = "eu-eurlex" ]; then
         benchmark="retrieval-benchmark-$pub.json"
-        manifest_id=$(sha256sum "$manifest" | cut -d' ' -f1)
         dotnet run --project lex/src/Lex.Ingest -c Release -- benchmark \
           --index "index-$pub.db" --vectors "index-$pub.vectors" --model-dir . \
           --out "$benchmark" --code-commit "$lex_code_commit" --manifest-id "$manifest_id" \
@@ -374,14 +411,45 @@ if [ -f .index-queue ]; then
       fi
       tag="corpus-$(date -u +%F)"
       release_assets+=("$manifest" "$signature")
-      if gh release create "$tag" "${release_assets[@]}" --repo "$repo" \
-           --title "index-$pub $(date -u +%F)" \
-           --notes "Signed index and whole-release manifest. Verify against the public key pinned by Lex before use. Free to download and use; redistribution of any build reserved (NOTICE layer 2)." \
-         || gh release upload "$tag" "${release_assets[@]}" --repo "$repo" --clobber; then
+      blob_published=0
+      if [ "$signing_mode" = "keyvault" ]; then
+        if publish_blob_release "$pub" "$manifest_id" "$corpus_commit" "${release_assets[@]}"; then
+          blob_published=1
+          echo "--- $pub: published immutable Blob release $manifest_id"
+        else
+          echo "--- $pub: failed_blob_release"
+          overall_rc=1
+          continue
+        fi
+      fi
+
+      github_compatible=1
+      for asset in "${release_assets[@]}"; do
+        if [ "$(stat -c %s "$asset")" -gt 2147483648 ]; then
+          github_compatible=0
+          echo "--- $pub: $(basename "$asset") exceeds GitHub's 2 GiB asset limit; Blob is canonical"
+        fi
+      done
+      github_published=0
+      if [ "$github_compatible" = "1" ] \
+         && { gh release create "$tag" "${release_assets[@]}" --repo "$repo" \
+                --title "index-$pub $(date -u +%F)" \
+                --notes "Signed index and whole-release manifest. Verify against the public key pinned by Lex before use. Free to download and use; redistribution of any build reserved (NOTICE layer 2)." \
+              || gh release upload "$tag" "${release_assets[@]}" --repo "$repo" --clobber; }; then
+        github_published=1
+      fi
+
+      if [ "$blob_published" = "1" ] || [ "$github_published" = "1" ]; then
         published_artifacts=1
       else
         echo "--- $pub: failed_release"
         overall_rc=1
+        continue
+      fi
+      if [ "$github_published" != "1" ]; then
+        # The current Container App image build consumes the GitHub mirror. Never deploy a mixed
+        # generation merely because a smaller publisher succeeded before an oversized one.
+        deployment_blocked=1
       fi
     else
       echo "--- $pub: failed_index"; overall_rc=1
@@ -392,11 +460,14 @@ if [ -f .index-queue ]; then
   # Deployment remains explicitly gated during the migration. Once the Lex production OIDC
   # environment exists, setting this repository variable to 1 turns a verified publication into
   # an immutable image and candidate revision instead of leaving production one release behind.
-  if [ "$published_artifacts" = "1" ] && [ "${DEPLOY_AFTER_PUBLISH:-0}" = "1" ]; then
+  if [ "$published_artifacts" = "1" ] && [ "$deployment_blocked" = "0" ] \
+     && [ "${DEPLOY_AFTER_PUBLISH:-0}" = "1" ]; then
     gh api repos/SFHAJJI/lex/dispatches -X POST \
       -f event_type=verified_artifact_release \
       -F 'client_payload[require_manifest]=true' \
       || { echo "--- deploy dispatch failed"; overall_rc=1; }
+  elif [ "$published_artifacts" = "1" ] && [ "$deployment_blocked" != "0" ]; then
+    echo "--- Container App deployment skipped: one or more artifacts are Blob-only"
   fi
 fi
 
