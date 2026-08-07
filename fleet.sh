@@ -314,11 +314,14 @@ fi
 
 if [ -f .index-queue ]; then
   lex_code_commit=$(git -C lex rev-parse HEAD)
+  index_time_budget_minutes="${INDEX_TIME_BUDGET_MINUTES:-300}"
+  echo "=== index budget: ${index_time_budget_minutes} minutes (reporting only; no automatic cancellation) ==="
   while read -r pub repo; do
     echo "=== index ($pub) ==="
     if dotnet run --project lex/src/Lex.Ingest -c Release -- index --corpus "corpus-$pub" \
          --articles articles --out "index-$pub.db" --keyfile signing-key.pem \
-         --embedding-model . --vectors "index-$pub.vectors"; then
+         --embedding-model . --vectors "index-$pub.vectors" \
+         --time-budget-minutes "$index_time_budget_minutes"; then
       corpus_commit=$(git -C "corpus-$pub" rev-parse HEAD)
       manifest="index-$pub.manifest.json"
       signature="index-$pub.manifest.sig"
