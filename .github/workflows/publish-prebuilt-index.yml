@@ -1,0 +1,74 @@
+name: publish-prebuilt-index
+
+on:
+  workflow_dispatch:
+    inputs:
+      publisher:
+        description: Enabled publisher id
+        required: true
+        type: choice
+        options:
+          - eu-eurlex
+          - lu-legilux
+      staging_prefix:
+        description: Private Blob prefix containing the prebuilt DB and vector file
+        required: true
+        type: string
+      corpus_commit:
+        description: Full corpus Git commit used to build the index
+        required: true
+        type: string
+      index_sha256:
+        description: Expected SHA-256 of index-<publisher>.db
+        required: true
+        type: string
+      vectors_sha256:
+        description: Expected SHA-256 of index-<publisher>.vectors
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-prebuilt-${{ inputs.publisher }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/checkout@v6
+        with:
+          repository: SFHAJJI/lex
+          path: lex
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Azure login for private staging and non-exportable signing
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Validate, sign, benchmark, and publish
+        env:
+          GH_TOKEN: ${{ secrets.LEX_OPS_TOKEN }}
+          PUBLISHER: ${{ inputs.publisher }}
+          STAGING_PREFIX: ${{ inputs.staging_prefix }}
+          CORPUS_COMMIT: ${{ inputs.corpus_commit }}
+          EXPECTED_INDEX_SHA256: ${{ inputs.index_sha256 }}
+          EXPECTED_VECTORS_SHA256: ${{ inputs.vectors_sha256 }}
+          ARTIFACT_KEY_ID: ${{ vars.ARTIFACT_KEY_ID }}
+          AZURE_INDEX_STORAGE_ACCOUNT: ${{ vars.AZURE_INDEX_STORAGE_ACCOUNT }}
+          AZURE_KEY_VAULT: ${{ vars.AZURE_KEY_VAULT }}
+          AZURE_KEY_NAME: ${{ vars.AZURE_KEY_NAME }}
+          DEPLOY_AFTER_PUBLISH: ${{ vars.DEPLOY_AFTER_PUBLISH }}
+        run: bash publish-prebuilt-index.sh

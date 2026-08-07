@@ -66,6 +66,15 @@ image identified by the code and artifact-manifest hashes, creates a zero-traffi
 revision, runs health, MCP and assistant smoke tests, and only then promotes traffic. The previous
 revision remains available for immediate rollback.
 
+If a hosted runner deadline interrupts a large build but a trusted local or self-hosted builder
+finishes it, `publish-prebuilt-index` promotes those bytes without bypassing the same gates. The
+operator first uploads the DB and vector file to a private `staging/<publisher>/...` Blob prefix,
+then dispatches the workflow with their SHA-256 values and the exact corpus commit. The OIDC runner
+re-downloads and checks the bytes, resolves the pinned model and scope, creates the whole-artifact
+manifest, signs it with Key Vault, runs the public benchmark, and only then updates the immutable
+Blob/GitHub releases and deployment pointer. Staging is never a runtime source, and unsigned or
+hash-mismatched artifacts cannot be promoted.
+
 During the dual-reader rollback window, `LEX_SIGNING_KEY` still signs only the index's embedded
 compatibility stamp. The application does not trust that adjacent public key. Runtime trust comes
 from the whole-release Key Vault signature and the public-key fingerprint pinned in the Lex image.
