@@ -10,6 +10,8 @@ night, never a heartbeat in a corpus repo.
 Workflow concurrency is serialized without preemption. If a manual recovery run overlaps the
 02:17 schedule, the scheduled run waits rather than racing the active publisher, article, release,
 or status writers. The active run is never canceled merely because a newer trigger arrived.
+The final status-only commit rebases onto the current `main` and retries a bounded three times, so
+an unrelated operations change made during a long Fleet run does not silently discard its status.
 
 If an index build is interrupted after corpus and article commits land, dispatch the workflow with
 `force_index_publisher` set to that enabled publisher id (for example, `eu-eurlex`). Fleet still
