@@ -7,6 +7,10 @@ and signs indexes, uploads release assets, and writes the fleet's three-state
 status (`ran_no_change` / `ran_committed` / `failed_*`) — one status commit per
 night, never a heartbeat in a corpus repo.
 
+Workflow concurrency is serialized without preemption. If a manual recovery run overlaps the
+02:17 schedule, the scheduled run waits rather than racing the active publisher, article, release,
+or status writers. The active run is never canceled merely because a newer trigger arrived.
+
 - `publishers.json` — the fleet registry.
 - `fleet.sh` — the runner.
 - `status/` — per-publisher status records (the freshness feed).
