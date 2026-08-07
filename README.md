@@ -13,9 +13,10 @@ or status writers. The active run is never canceled merely because a newer trigg
 
 If an index build is interrupted after corpus and article commits land, dispatch the workflow with
 `force_index_publisher` set to that enabled publisher id (for example, `eu-eurlex`). Fleet still
-verifies and derives the committed inputs, but queues only that publisher's index when ingestion is
-unchanged. Invalid or disabled ids fail before cloning, and a failed publisher ingest cannot be
-forced past the publication gates.
+verifies and derives the committed inputs, but it does not poll any publisher or advance a corpus
+head during recovery. It also suppresses the normal stale-index sweep and queues exactly the named
+publisher. Invalid or disabled ids fail before cloning, and integrity or derivation failures cannot
+be forced past the publication gates.
 
 - `publishers.json` — the fleet registry.
 - `fleet.sh` — the runner.

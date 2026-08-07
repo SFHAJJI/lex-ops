@@ -32,6 +32,12 @@ for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
       echo "INTEGRITY: checked-out corpus evidence is invalid. Ingesting and committing nothing."
       outcome="failed_base_integrity"
       overall_rc=1
+    elif [ -n "$FORCE_INDEX_PUBLISHER" ]; then
+      # A recovery rebuild is intentionally pinned to the already committed corpus heads. It
+      # must not spend time polling publishers or advance one input while reproducing another.
+      works="$prev_works"
+      outcome="ran_no_change"
+      echo "--- recovery snapshot: verified committed $pub head; publisher poll skipped"
     elif dotnet run --project lex/src/Lex.Ingest -c Release -- ingest --publisher "$pub" --corpus "$dir"; then
       new_works=$(jq -r '.works // 0' "$dir/manifest.json" 2>/dev/null || echo 0)
       works="$new_works"
@@ -158,41 +164,45 @@ fi
 # Only when derive is known good. The block above deliberately empties the queue when it is
 # not, and re-queueing here would walk straight past that safety check.
 if [ "$derive_outcome" = "ran_committed" ] || [ "$derive_outcome" = "ran_no_change" ]; then
-  MAX_INDEX_AGE_DAYS="${MAX_INDEX_AGE_DAYS:-7}"
-  echo "=== stale-index check (max ${MAX_INDEX_AGE_DAYS}d) ==="
-  for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
-    repo=$(jq -r ".publishers[] | select(.id==\"$pub\") | .corpus_repo" publishers.json)
-    publisher_outcome=$(jq -r '.outcome // "failed"' "status/$pub.json" 2>/dev/null || echo failed)
-    case "$publisher_outcome" in
-      ran_committed|ran_no_change) ;;
-      *) echo "--- $pub: ingest outcome is $publisher_outcome, refusing index refresh"; continue ;;
-    esac
-    if [ -f .index-queue ] && grep -q "^$pub " .index-queue; then
-      echo "--- $pub: already queued"; continue
-    fi
-    # No corpus checkout means ingest failed tonight. Do not paper over that with a rebuild.
-    if [ ! -d "corpus-$pub" ]; then
-      echo "--- $pub: no corpus checkout, skipping"; continue
-    fi
-    published=$(gh release view --repo "$repo" --json publishedAt -q .publishedAt 2>/dev/null || true)
-    if [ -z "$published" ]; then
-      echo "--- $pub: no release yet, queueing"; echo "$pub $repo" >> .index-queue; continue
-    fi
-    manifest="index-$pub.manifest.json"
-    if ! gh release view --repo "$repo" --json assets -q '.assets[].name' 2>/dev/null \
-         | grep -Fxq "$manifest"; then
-      echo "--- $pub: release has no signed artifact manifest, queueing migration refresh"
-      echo "$pub $repo" >> .index-queue
-      continue
-    fi
-    age=$(( ( $(date -u +%s) - $(date -u -d "$published" +%s) ) / 86400 ))
-    if [ "$age" -ge "$MAX_INDEX_AGE_DAYS" ]; then
-      echo "--- $pub: published index is ${age}d old, queueing a refresh"
-      echo "$pub $repo" >> .index-queue
-    else
-      echo "--- $pub: published index is ${age}d old, fresh enough"
-    fi
-  done
+  if [ -z "$FORCE_INDEX_PUBLISHER" ]; then
+    MAX_INDEX_AGE_DAYS="${MAX_INDEX_AGE_DAYS:-7}"
+    echo "=== stale-index check (max ${MAX_INDEX_AGE_DAYS}d) ==="
+    for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
+      repo=$(jq -r ".publishers[] | select(.id==\"$pub\") | .corpus_repo" publishers.json)
+      publisher_outcome=$(jq -r '.outcome // "failed"' "status/$pub.json" 2>/dev/null || echo failed)
+      case "$publisher_outcome" in
+        ran_committed|ran_no_change) ;;
+        *) echo "--- $pub: ingest outcome is $publisher_outcome, refusing index refresh"; continue ;;
+      esac
+      if [ -f .index-queue ] && grep -q "^$pub " .index-queue; then
+        echo "--- $pub: already queued"; continue
+      fi
+      # No corpus checkout means ingest failed tonight. Do not paper over that with a rebuild.
+      if [ ! -d "corpus-$pub" ]; then
+        echo "--- $pub: no corpus checkout, skipping"; continue
+      fi
+      published=$(gh release view --repo "$repo" --json publishedAt -q .publishedAt 2>/dev/null || true)
+      if [ -z "$published" ]; then
+        echo "--- $pub: no release yet, queueing"; echo "$pub $repo" >> .index-queue; continue
+      fi
+      manifest="index-$pub.manifest.json"
+      if ! gh release view --repo "$repo" --json assets -q '.assets[].name' 2>/dev/null \
+           | grep -Fxq "$manifest"; then
+        echo "--- $pub: release has no signed artifact manifest, queueing migration refresh"
+        echo "$pub $repo" >> .index-queue
+        continue
+      fi
+      age=$(( ( $(date -u +%s) - $(date -u -d "$published" +%s) ) / 86400 ))
+      if [ "$age" -ge "$MAX_INDEX_AGE_DAYS" ]; then
+        echo "--- $pub: published index is ${age}d old, queueing a refresh"
+        echo "$pub $repo" >> .index-queue
+      else
+        echo "--- $pub: published index is ${age}d old, fresh enough"
+      fi
+    done
+  else
+    echo "=== stale-index check skipped for publisher-scoped recovery ==="
+  fi
 
   # Recovery runs may need to repeat an index build after the runner timed out even though
   # ingestion and derivation were already committed successfully. Scope that override to one
