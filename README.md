@@ -25,6 +25,12 @@ EU releases also carry the exact reviewed `eu-scope.json` that selected their wo
 signed artifact, so a reviewer can reproduce which domains, languages, waves and relationship
 rules produced a particular index.
 
+The derived `lex-articles` repository carries `generation.json`, which records every enabled
+corpus head and the Git tree fingerprint of `src/Lex.Derive`. Fleet accepts derived changes only
+when that deterministic input identity changes. This allows a failed run to resume after corpus
+publication and allows an intentional versioned extraction profile to regenerate results, while
+identical inputs producing a diff still fail as nondeterminism.
+
 Production publication uses `ARTIFACT_SIGNING_MODE=keyvault`. GitHub Actions authenticates through
 the production OIDC environment, and Azure Key Vault signs each canonical manifest with the
 non-exportable P-256 key. The private key never enters the runner. The publisher identity has only
