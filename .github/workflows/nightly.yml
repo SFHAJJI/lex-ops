@@ -9,6 +9,13 @@ permissions:
   issues: write
   id-token: write
 
+# A manual recovery run can overlap the next 02:17 schedule. Serialize them so two
+# writers never race on corpus heads, derived artifacts, release tags, or status.
+# Preserve the active run; a later run waits and normally becomes a cheap no-op.
+concurrency:
+  group: nightly-fleet
+  cancel-in-progress: false
+
 jobs:
   fleet:
     runs-on: ubuntu-latest
