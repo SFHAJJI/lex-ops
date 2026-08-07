@@ -89,8 +89,20 @@ jobs:
           git config user.name "lex-ops"
           git config user.email "haji.soufien@gmail.com"
           git add status
-          git commit -m "fleet status $(date -u +%F)" || echo "no status change"
-          git push || true
+          if ! git commit -m "fleet status $(date -u +%F)"; then
+            echo "no status change"
+            exit 0
+          fi
+          for attempt in 1 2 3; do
+            git fetch origin main
+            if git rebase origin/main && git push origin HEAD:main; then
+              exit 0
+            fi
+            git rebase --abort || true
+            if [ "$attempt" -lt 3 ]; then sleep $((attempt * 2)); fi
+          done
+          echo "status commit could not be published after three attempts"
+          exit 1
 
       - name: fleet-status issue on failure
         if: failure()
