@@ -28,6 +28,14 @@ set -euo pipefail
 repo=$(jq -er --arg pub "$PUBLISHER" \
   '.publishers[] | select(.enabled and .id == $pub) | .corpus_repo' publishers.json)
 
+# The checked-out Lex tree supplies the publication tooling. The index itself may have been built
+# earlier, so preserve both commits rather than relabelling old bytes with today's source revision.
+publication_tool_commit=$(git -C lex rev-parse HEAD)
+git -C lex cat-file -e "$BUILD_CODE_COMMIT^{commit}" 2>/dev/null \
+  || { echo "ERROR: build code commit is not present in the Lex repository" >&2; exit 2; }
+git -C lex merge-base --is-ancestor "$BUILD_CODE_COMMIT" "$publication_tool_commit" \
+  || { echo "ERROR: build code commit is not an ancestor of publication tooling" >&2; exit 2; }
+
 index="index-$PUBLISHER.db"
 vectors="index-$PUBLISHER.vectors"
 manifest="index-$PUBLISHER.manifest.json"
@@ -47,13 +55,6 @@ echo "=== resolve exact corpus and pinned embedding runtime ==="
 git clone --filter=blob:none "https://x-access-token:${GH_TOKEN}@github.com/${repo}.git" corpus
 git -C corpus checkout --detach "$CORPUS_COMMIT"
 test "$(git -C corpus rev-parse HEAD)" = "$CORPUS_COMMIT"
-
-# The checked-out Lex tree supplies the publication tooling. The index itself may have been built
-# earlier, so preserve both commits rather than relabelling old bytes with today's source revision.
-publication_tool_commit=$(git -C lex rev-parse HEAD)
-git -C lex cat-file -e "$BUILD_CODE_COMMIT^{commit}"
-git -C lex merge-base --is-ancestor "$BUILD_CODE_COMMIT" "$publication_tool_commit" \
-  || { echo "ERROR: build code commit is not an ancestor of publication tooling" >&2; exit 2; }
 
 cp lex/deploy/embedding-model/model-manifest.json model-manifest.json
 model_revision=$(jq -r .revision model-manifest.json)
