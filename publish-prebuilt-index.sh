@@ -7,6 +7,7 @@ set -euo pipefail
 : "${PUBLISHER:?PUBLISHER is required}"
 : "${STAGING_PREFIX:?STAGING_PREFIX is required}"
 : "${CORPUS_COMMIT:?CORPUS_COMMIT is required}"
+: "${BUILD_CODE_COMMIT:?BUILD_CODE_COMMIT is required}"
 : "${EXPECTED_INDEX_SHA256:?EXPECTED_INDEX_SHA256 is required}"
 : "${EXPECTED_VECTORS_SHA256:?EXPECTED_VECTORS_SHA256 is required}"
 : "${ARTIFACT_KEY_ID:?ARTIFACT_KEY_ID is required}"
@@ -18,12 +19,22 @@ set -euo pipefail
   || { echo "ERROR: unsafe staging prefix" >&2; exit 2; }
 [[ "$CORPUS_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
   || { echo "ERROR: corpus commit must be a full lowercase SHA" >&2; exit 2; }
+[[ "$BUILD_CODE_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+  || { echo "ERROR: build code commit must be a full lowercase SHA" >&2; exit 2; }
 [[ "$EXPECTED_INDEX_SHA256" =~ ^[0-9a-f]{64}$ ]] \
   || { echo "ERROR: invalid index SHA-256" >&2; exit 2; }
 [[ "$EXPECTED_VECTORS_SHA256" =~ ^[0-9a-f]{64}$ ]] \
   || { echo "ERROR: invalid vector SHA-256" >&2; exit 2; }
 repo=$(jq -er --arg pub "$PUBLISHER" \
   '.publishers[] | select(.enabled and .id == $pub) | .corpus_repo' publishers.json)
+
+# The checked-out Lex tree supplies the publication tooling. The index itself may have been built
+# earlier, so preserve both commits rather than relabelling old bytes with today's source revision.
+publication_tool_commit=$(git -C lex rev-parse HEAD)
+git -C lex cat-file -e "$BUILD_CODE_COMMIT^{commit}" 2>/dev/null \
+  || { echo "ERROR: build code commit is not present in the Lex repository" >&2; exit 2; }
+git -C lex merge-base --is-ancestor "$BUILD_CODE_COMMIT" "$publication_tool_commit" \
+  || { echo "ERROR: build code commit is not an ancestor of publication tooling" >&2; exit 2; }
 
 index="index-$PUBLISHER.db"
 vectors="index-$PUBLISHER.vectors"
@@ -68,12 +79,12 @@ if [ "$PUBLISHER" = "eu-eurlex" ]; then
   release_assets+=(eu-scope.json)
 fi
 
-lex_code_commit=$(git -C lex rev-parse HEAD)
 echo "=== create and verify Key Vault-signed whole-artifact manifest ==="
 dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
   --root . "${artifact_files[@]}" --manifest "$manifest" \
-  --key-id "$ARTIFACT_KEY_ID" --code-commit "$lex_code_commit" \
+  --key-id "$ARTIFACT_KEY_ID" --code-commit "$BUILD_CODE_COMMIT" \
   --source "collection=$PUBLISHER" --source "corpus_commit=$CORPUS_COMMIT" \
+  --source "publication_tool_commit=$publication_tool_commit" \
   --source "build_origin=hash-pinned-private-staging"
 digest=$(openssl dgst -sha256 -binary "$manifest" | openssl base64 -A)
 az keyvault key sign --vault-name "$AZURE_KEY_VAULT" --name "$AZURE_KEY_NAME" \
@@ -91,7 +102,7 @@ if [ "$PUBLISHER" = "eu-eurlex" ]; then
   set +e
   dotnet run --project lex/src/Lex.Ingest -c Release -- benchmark \
     --index "$index" --vectors "$vectors" --model-dir . --out "$benchmark" \
-    --code-commit "$lex_code_commit" --manifest-id "$manifest_id" \
+    --code-commit "$publication_tool_commit" --manifest-id "$manifest_id" \
     --machine github-actions-ubuntu-latest \
     --resource "Container Apps Consumption target, 2 GiB configured limit" \
     --memory-limit-bytes 2147483648
@@ -104,7 +115,7 @@ if [ "$PUBLISHER" = "eu-eurlex" ]; then
   benchmark_signature="retrieval-benchmark-$PUBLISHER.manifest.sig"
   dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
     --root . --file "$benchmark" --manifest "$benchmark_manifest" \
-    --key-id "$ARTIFACT_KEY_ID" --code-commit "$lex_code_commit" \
+    --key-id "$ARTIFACT_KEY_ID" --code-commit "$publication_tool_commit" \
     --source "collection=$PUBLISHER" --source "corpus_commit=$CORPUS_COMMIT" \
     --source "index_manifest_sha256=$manifest_id"
   benchmark_digest=$(openssl dgst -sha256 -binary "$benchmark_manifest" | openssl base64 -A)

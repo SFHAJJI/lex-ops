@@ -18,6 +18,10 @@ on:
         description: Full corpus Git commit used to build the index
         required: true
         type: string
+      build_code_commit:
+        description: Full Lex Git commit that built the prebuilt index
+        required: true
+        type: string
       index_sha256:
         description: Expected SHA-256 of index-<publisher>.db
         required: true
@@ -46,6 +50,7 @@ jobs:
         with:
           repository: SFHAJJI/lex
           path: lex
+          fetch-depth: 0
 
       - uses: actions/setup-dotnet@v5
         with:
@@ -64,6 +69,7 @@ jobs:
           PUBLISHER: ${{ inputs.publisher }}
           STAGING_PREFIX: ${{ inputs.staging_prefix }}
           CORPUS_COMMIT: ${{ inputs.corpus_commit }}
+          BUILD_CODE_COMMIT: ${{ inputs.build_code_commit }}
           EXPECTED_INDEX_SHA256: ${{ inputs.index_sha256 }}
           EXPECTED_VECTORS_SHA256: ${{ inputs.vectors_sha256 }}
           ARTIFACT_KEY_ID: ${{ vars.ARTIFACT_KEY_ID }}
