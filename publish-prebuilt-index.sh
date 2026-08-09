@@ -73,11 +73,17 @@ dotnet run --project lex/src/Lex.Ingest -c Release -- embedding-smoke \
 artifact_files=(--file "$index" --file "$vectors" --file model-manifest.json \
   --file model.onnx --file sentencepiece.bpe.model)
 release_assets=("$index" "$vectors" model-manifest.json model.onnx sentencepiece.bpe.model)
+verify_stamp_args=(--db "$index" --expected-collection "$PUBLISHER" \
+  --expected-corpus-commit "$CORPUS_COMMIT")
 if [ "$PUBLISHER" = "eu-eurlex" ]; then
   cp lex/src/Lex.Sources.EurLex/eu-scope.json eu-scope.json
-  artifact_files+=(--file eu-scope.json)
-  release_assets+=(eu-scope.json)
+  cp lex/config/eu-work-enrichment.json eu-work-enrichment.json
+  verify_stamp_args+=(--work-enrichment eu-work-enrichment.json)
+  artifact_files+=(--file eu-scope.json --file eu-work-enrichment.json)
+  release_assets+=(eu-scope.json eu-work-enrichment.json)
 fi
+dotnet run --project lex/src/Lex.Ingest -c Release -- verify stamp \
+  "${verify_stamp_args[@]}"
 
 echo "=== create and verify Key Vault-signed whole-artifact manifest ==="
 dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
@@ -96,38 +102,36 @@ dotnet run --project lex/src/Lex.Ingest -c Release -- artifact verify \
   --trust-roots lex/deploy/trusted-artifact-roots.json
 manifest_id=$(sha256sum "$manifest" | cut -d' ' -f1)
 
-if [ "$PUBLISHER" = "eu-eurlex" ]; then
-  echo "=== benchmark retrieval (a gated result is publishable) ==="
-  benchmark="retrieval-benchmark-$PUBLISHER.json"
-  set +e
-  dotnet run --project lex/src/Lex.Ingest -c Release -- benchmark \
+echo "=== benchmark retrieval (a gated result is publishable) ==="
+benchmark="retrieval-benchmark-$PUBLISHER.json"
+set +e
+dotnet run --project lex/src/Lex.Ingest -c Release -- benchmark \
     --index "$index" --vectors "$vectors" --model-dir . --out "$benchmark" \
     --code-commit "$publication_tool_commit" --manifest-id "$manifest_id" \
     --machine github-actions-ubuntu-latest \
     --resource "Container Apps Consumption target, 2 GiB configured limit" \
     --memory-limit-bytes 2147483648
-  benchmark_rc=$?
-  set -e
-  [ "$benchmark_rc" -eq 0 ] || [ "$benchmark_rc" -eq 5 ] \
-    || { echo "ERROR: benchmark execution failed ($benchmark_rc)" >&2; exit "$benchmark_rc"; }
+benchmark_rc=$?
+set -e
+[ "$benchmark_rc" -eq 0 ] || [ "$benchmark_rc" -eq 5 ] \
+  || { echo "ERROR: benchmark execution failed ($benchmark_rc)" >&2; exit "$benchmark_rc"; }
 
-  benchmark_manifest="retrieval-benchmark-$PUBLISHER.manifest.json"
-  benchmark_signature="retrieval-benchmark-$PUBLISHER.manifest.sig"
-  dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
+benchmark_manifest="retrieval-benchmark-$PUBLISHER.manifest.json"
+benchmark_signature="retrieval-benchmark-$PUBLISHER.manifest.sig"
+dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
     --root . --file "$benchmark" --manifest "$benchmark_manifest" \
     --key-id "$ARTIFACT_KEY_ID" --code-commit "$publication_tool_commit" \
     --source "collection=$PUBLISHER" --source "corpus_commit=$CORPUS_COMMIT" \
     --source "index_manifest_sha256=$manifest_id"
-  benchmark_digest=$(openssl dgst -sha256 -binary "$benchmark_manifest" | openssl base64 -A)
-  az keyvault key sign --vault-name "$AZURE_KEY_VAULT" --name "$AZURE_KEY_NAME" \
+benchmark_digest=$(openssl dgst -sha256 -binary "$benchmark_manifest" | openssl base64 -A)
+az keyvault key sign --vault-name "$AZURE_KEY_VAULT" --name "$AZURE_KEY_NAME" \
     --algorithm ES256 --digest "$benchmark_digest" -o json \
     | jq -er 'if type == "string" then . else (.signature // .value // .result) end' \
     > "$benchmark_signature"
-  dotnet run --project lex/src/Lex.Ingest -c Release -- artifact verify \
+dotnet run --project lex/src/Lex.Ingest -c Release -- artifact verify \
     --root . --manifest "$benchmark_manifest" --signature "$benchmark_signature" \
     --trust-roots lex/deploy/trusted-artifact-roots.json
-  release_assets+=("$benchmark" "$benchmark_manifest" "$benchmark_signature")
-fi
+release_assets+=("$benchmark" "$benchmark_manifest" "$benchmark_signature")
 
 release_assets+=("$manifest" "$signature")
 
