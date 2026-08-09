@@ -74,7 +74,8 @@ artifact_files=(--file "$index" --file "$vectors" --file model-manifest.json \
   --file model.onnx --file sentencepiece.bpe.model)
 release_assets=("$index" "$vectors" model-manifest.json model.onnx sentencepiece.bpe.model)
 verify_stamp_args=(--db "$index" --expected-collection "$PUBLISHER" \
-  --expected-corpus-commit "$CORPUS_COMMIT")
+  --expected-corpus-commit "$CORPUS_COMMIT" \
+  --expected-code-commit "$BUILD_CODE_COMMIT")
 if [ "$PUBLISHER" = "eu-eurlex" ]; then
   cp lex/src/Lex.Sources.EurLex/eu-scope.json eu-scope.json
   cp lex/config/eu-work-enrichment.json eu-work-enrichment.json

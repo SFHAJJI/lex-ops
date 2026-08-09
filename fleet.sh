@@ -320,7 +320,8 @@ if [ -f .index-queue ]; then
     echo "=== index ($pub) ==="
     index_args=(--corpus "corpus-$pub" --articles articles --out "index-$pub.db" \
       --keyfile signing-key.pem --embedding-model . --vectors "index-$pub.vectors" \
-      --time-budget-minutes "$index_time_budget_minutes")
+      --time-budget-minutes "$index_time_budget_minutes" \
+      --code-commit "$lex_code_commit")
     if [ "$pub" = "eu-eurlex" ]; then
       cp lex/config/eu-work-enrichment.json eu-work-enrichment.json
       index_args+=(--work-enrichment eu-work-enrichment.json)
@@ -334,7 +335,8 @@ if [ -f .index-queue ]; then
       release_assets=("index-$pub.db" "index-$pub.vectors" model-manifest.json \
         model.onnx sentencepiece.bpe.model)
       verify_stamp_args=(--db "index-$pub.db" --expected-collection "$pub" \
-        --expected-corpus-commit "$corpus_commit")
+        --expected-corpus-commit "$corpus_commit" \
+        --expected-code-commit "$lex_code_commit")
       if [ "$pub" = "eu-eurlex" ]; then
         cp lex/src/Lex.Sources.EurLex/eu-scope.json eu-scope.json
         artifact_files+=(--file eu-scope.json --file eu-work-enrichment.json)
