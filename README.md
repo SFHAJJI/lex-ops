@@ -75,6 +75,12 @@ manifest, signs it with Key Vault, runs the public benchmark, and only then upda
 Blob/GitHub releases and deployment pointer. Staging is never a runtime source, and unsigned or
 hash-mismatched artifacts cannot be promoted.
 
+The normal Fleet run remains the default for routine updates. Use the prebuilt path when the same
+deterministic index build has exceeded, or is expected to exceed, the six-hour hosted-runner window.
+Do not use `force_index_publisher` merely to repeat a build that cannot fit that window: build from
+the exact committed corpus and Lex revisions locally, upload only the DB and vector artifacts, and
+let `publish-prebuilt-index` perform provenance checks, signing, benchmarking and deployment.
+
 During the dual-reader rollback window, `LEX_SIGNING_KEY` still signs only the index's embedded
 compatibility stamp. The application does not trust that adjacent public key. Runtime trust comes
 from the whole-release Key Vault signature and the public-key fingerprint pinned in the Lex image.
