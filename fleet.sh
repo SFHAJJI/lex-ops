@@ -318,10 +318,14 @@ if [ -f .index-queue ]; then
   echo "=== index budget: ${index_time_budget_minutes} minutes (reporting only; no automatic cancellation) ==="
   while read -r pub repo; do
     echo "=== index ($pub) ==="
-    if dotnet run --project lex/src/Lex.Ingest -c Release -- index --corpus "corpus-$pub" \
-         --articles articles --out "index-$pub.db" --keyfile signing-key.pem \
-         --embedding-model . --vectors "index-$pub.vectors" \
-         --time-budget-minutes "$index_time_budget_minutes"; then
+    index_args=(--corpus "corpus-$pub" --articles articles --out "index-$pub.db" \
+      --keyfile signing-key.pem --embedding-model . --vectors "index-$pub.vectors" \
+      --time-budget-minutes "$index_time_budget_minutes")
+    if [ "$pub" = "eu-eurlex" ]; then
+      cp lex/config/eu-work-enrichment.json eu-work-enrichment.json
+      index_args+=(--work-enrichment eu-work-enrichment.json)
+    fi
+    if dotnet run --project lex/src/Lex.Ingest -c Release -- index "${index_args[@]}"; then
       corpus_commit=$(git -C "corpus-$pub" rev-parse HEAD)
       manifest="index-$pub.manifest.json"
       signature="index-$pub.manifest.sig"
@@ -329,10 +333,17 @@ if [ -f .index-queue ]; then
         --file model-manifest.json --file model.onnx --file sentencepiece.bpe.model)
       release_assets=("index-$pub.db" "index-$pub.vectors" model-manifest.json \
         model.onnx sentencepiece.bpe.model)
+      verify_stamp_args=(--db "index-$pub.db" --expected-collection "$pub" \
+        --expected-corpus-commit "$corpus_commit")
       if [ "$pub" = "eu-eurlex" ]; then
         cp lex/src/Lex.Sources.EurLex/eu-scope.json eu-scope.json
-        artifact_files+=(--file eu-scope.json)
-        release_assets+=(eu-scope.json)
+        artifact_files+=(--file eu-scope.json --file eu-work-enrichment.json)
+        release_assets+=(eu-scope.json eu-work-enrichment.json)
+        verify_stamp_args+=(--work-enrichment eu-work-enrichment.json)
+      fi
+      if ! dotnet run --project lex/src/Lex.Ingest -c Release -- verify stamp \
+           "${verify_stamp_args[@]}"; then
+        echo "--- $pub: failed_stamp_binding"; overall_rc=1; continue
       fi
       signing_mode="${ARTIFACT_SIGNING_MODE:-legacy}"
       if [ "$signing_mode" = "keyvault" ]; then
@@ -366,52 +377,50 @@ if [ -f .index-queue ]; then
         echo "--- $pub: failed_manifest_verify"; overall_rc=1; continue
       fi
       manifest_id=$(sha256sum "$manifest" | cut -d' ' -f1)
-      if [ "$pub" = "eu-eurlex" ]; then
-        benchmark="retrieval-benchmark-$pub.json"
-        dotnet run --project lex/src/Lex.Ingest -c Release -- benchmark \
+      benchmark="retrieval-benchmark-$pub.json"
+      dotnet run --project lex/src/Lex.Ingest -c Release -- benchmark \
           --index "index-$pub.db" --vectors "index-$pub.vectors" --model-dir . \
           --out "$benchmark" --code-commit "$lex_code_commit" --manifest-id "$manifest_id" \
           --machine "github-actions-ubuntu-latest" \
-          --resource "Container Apps Consumption target, 0.5 GiB configured limit" \
-          --memory-limit-bytes 536870912
-        benchmark_rc=$?
-        if [ "$benchmark_rc" -ne 0 ] && [ "$benchmark_rc" -ne 5 ]; then
-          echo "--- $pub: failed_benchmark"; overall_rc=1; continue
-        fi
-        # Exit 5 means the public activation gate did not pass. That is an expected, publishable
-        # result while hybrid is gated, not permission to change the production default.
-        benchmark_manifest="retrieval-benchmark-$pub.manifest.json"
-        benchmark_signature="retrieval-benchmark-$pub.manifest.sig"
-        if [ "$signing_mode" = "keyvault" ]; then
-          if ! dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
+          --resource "Container Apps Consumption target, 2 GiB configured limit" \
+          --memory-limit-bytes 2147483648
+      benchmark_rc=$?
+      if [ "$benchmark_rc" -ne 0 ] && [ "$benchmark_rc" -ne 5 ]; then
+        echo "--- $pub: failed_benchmark"; overall_rc=1; continue
+      fi
+      # Exit 5 means the public activation gate did not pass. That is an expected, publishable
+      # result while hybrid is gated, not permission to change the production default.
+      benchmark_manifest="retrieval-benchmark-$pub.manifest.json"
+      benchmark_signature="retrieval-benchmark-$pub.manifest.sig"
+      if [ "$signing_mode" = "keyvault" ]; then
+        if ! dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
                --root . --file "$benchmark" --manifest "$benchmark_manifest" \
                --key-id "$ARTIFACT_KEY_ID" --code-commit "$lex_code_commit" \
                --source "collection=$pub" --source "corpus_commit=$corpus_commit" \
                --source "index_manifest_sha256=$manifest_id"; then
-            echo "--- $pub: failed_benchmark_manifest"; overall_rc=1; continue
-          fi
-          benchmark_digest=$(openssl dgst -sha256 -binary "$benchmark_manifest" | openssl base64 -A)
-          if ! az keyvault key sign --vault-name "$AZURE_KEY_VAULT" --name "$AZURE_KEY_NAME" \
+          echo "--- $pub: failed_benchmark_manifest"; overall_rc=1; continue
+        fi
+        benchmark_digest=$(openssl dgst -sha256 -binary "$benchmark_manifest" | openssl base64 -A)
+        if ! az keyvault key sign --vault-name "$AZURE_KEY_VAULT" --name "$AZURE_KEY_NAME" \
                --algorithm ES256 --digest "$benchmark_digest" -o json \
                | jq -er 'if type == "string" then . else (.signature // .value // .result) end' \
                > "$benchmark_signature"; then
-            echo "--- $pub: failed_benchmark_key_vault_sign"; overall_rc=1; continue
-          fi
-        elif ! dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
+          echo "--- $pub: failed_benchmark_key_vault_sign"; overall_rc=1; continue
+        fi
+      elif ! dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
              --root . --file "$benchmark" --manifest "$benchmark_manifest" \
              --signature "$benchmark_signature" --keyfile signing-key.pem \
              --key-id legacy-index-2026 --code-commit "$lex_code_commit" \
              --source "collection=$pub" --source "corpus_commit=$corpus_commit" \
              --source "index_manifest_sha256=$manifest_id"; then
-          echo "--- $pub: failed_benchmark_manifest"; overall_rc=1; continue
-        fi
-        if ! dotnet run --project lex/src/Lex.Ingest -c Release -- artifact verify \
+        echo "--- $pub: failed_benchmark_manifest"; overall_rc=1; continue
+      fi
+      if ! dotnet run --project lex/src/Lex.Ingest -c Release -- artifact verify \
              --root . --manifest "$benchmark_manifest" --signature "$benchmark_signature" \
              --trust-roots lex/deploy/trusted-artifact-roots.json; then
-          echo "--- $pub: failed_benchmark_manifest_verify"; overall_rc=1; continue
-        fi
-        release_assets+=("$benchmark" "$benchmark_manifest" "$benchmark_signature")
+        echo "--- $pub: failed_benchmark_manifest_verify"; overall_rc=1; continue
       fi
+      release_assets+=("$benchmark" "$benchmark_manifest" "$benchmark_signature")
       tag="corpus-$(date -u +%F)"
       release_assets+=("$manifest" "$signature")
       blob_published=0
