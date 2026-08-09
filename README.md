@@ -70,10 +70,11 @@ If a hosted runner deadline interrupts a large build but a trusted local or self
 finishes it, `publish-prebuilt-index` promotes those bytes without bypassing the same gates. The
 operator first uploads the DB and vector file to a private `staging/<publisher>/...` Blob prefix,
 then dispatches the workflow with their SHA-256 values and the exact corpus commit. The OIDC runner
-re-downloads and checks the bytes, resolves the pinned model and scope, creates the whole-artifact
-manifest, signs it with Key Vault, runs the public benchmark, and only then updates the immutable
-Blob/GitHub releases and deployment pointer. Staging is never a runtime source, and unsigned or
-hash-mismatched artifacts cannot be promoted.
+re-downloads and checks the bytes, verifies that the index stamp binds the exact collection,
+corpus commit, Lex build commit, content digest and reviewed enrichment, resolves the pinned model
+and scope, creates the whole-artifact manifest, signs it with Key Vault, runs the public benchmark,
+and only then updates the immutable Blob/GitHub releases and deployment pointer. Staging is never a
+runtime source, and unsigned, mislabelled or hash-mismatched artifacts cannot be promoted.
 
 The normal Fleet run remains the default for routine updates. Use the prebuilt path when the same
 deterministic index build has exceeded, or is expected to exceed, the six-hour hosted-runner window.
