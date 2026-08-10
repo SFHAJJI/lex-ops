@@ -1,6 +1,6 @@
 {
   "publisher": "eu-eurlex",
-  "run": "2026-08-10T03:02:24Z",
-  "outcome": "ran_committed",
-  "works": 1248
+  "run": "2026-08-10T16:03:42Z",
+  "outcome": "failed_ingest",
+  "works": null
 }
