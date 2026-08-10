@@ -6,8 +6,10 @@ set -euo pipefail
 
 : "${PUBLISHER:?PUBLISHER is required}"
 : "${STAGING_PREFIX:?STAGING_PREFIX is required}"
+: "${QUEUE_COMMIT:?QUEUE_COMMIT is required}"
 : "${CORPUS_COMMIT:?CORPUS_COMMIT is required}"
 : "${BUILD_CODE_COMMIT:?BUILD_CODE_COMMIT is required}"
+: "${ARTICLES_COMMIT:?ARTICLES_COMMIT is required}"
 : "${EXPECTED_INDEX_SHA256:?EXPECTED_INDEX_SHA256 is required}"
 : "${EXPECTED_VECTORS_SHA256:?EXPECTED_VECTORS_SHA256 is required}"
 : "${ARTIFACT_KEY_ID:?ARTIFACT_KEY_ID is required}"
@@ -17,10 +19,14 @@ set -euo pipefail
 
 [[ "$STAGING_PREFIX" =~ ^staging/[a-z0-9-]+/[A-Za-z0-9._/-]+$ ]] \
   || { echo "ERROR: unsafe staging prefix" >&2; exit 2; }
+[[ "$QUEUE_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+  || { echo "ERROR: queue commit must be a full lowercase SHA" >&2; exit 2; }
 [[ "$CORPUS_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
   || { echo "ERROR: corpus commit must be a full lowercase SHA" >&2; exit 2; }
 [[ "$BUILD_CODE_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
   || { echo "ERROR: build code commit must be a full lowercase SHA" >&2; exit 2; }
+[[ "$ARTICLES_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+  || { echo "ERROR: articles commit must be a full lowercase SHA" >&2; exit 2; }
 [[ "$EXPECTED_INDEX_SHA256" =~ ^[0-9a-f]{64}$ ]] \
   || { echo "ERROR: invalid index SHA-256" >&2; exit 2; }
 [[ "$EXPECTED_VECTORS_SHA256" =~ ^[0-9a-f]{64}$ ]] \
@@ -28,13 +34,27 @@ set -euo pipefail
 repo=$(jq -er --arg pub "$PUBLISHER" \
   '.publishers[] | select(.enabled and .id == $pub) | .corpus_repo' publishers.json)
 
+git cat-file -e "$QUEUE_COMMIT^{commit}" 2>/dev/null \
+  || { echo "ERROR: queue commit is not present" >&2; exit 2; }
+git merge-base --is-ancestor "$QUEUE_COMMIT" refs/remotes/origin/main \
+  || { echo "ERROR: queue commit is not on the current main history" >&2; exit 2; }
+ticket=$(git show "$QUEUE_COMMIT:status/index-queue.json")
+printf '%s' "$ticket" | jq -e --arg pub "$PUBLISHER" --arg repo "$repo" \
+  --arg corpus "$CORPUS_COMMIT" --arg code "$BUILD_CODE_COMMIT" \
+  --arg articles "$ARTICLES_COMMIT" \
+  '.schema == "lex-index-build-queue/1"
+   and .mode == "prebuilt"
+   and .build_code_commit == $code
+   and .articles_commit == $articles
+   and ([.entries[] | select(.collection == $pub and .corpus_repo == $repo
+          and .corpus_commit == $corpus)] | length == 1)' >/dev/null \
+  || { echo "ERROR: publication inputs do not match the immutable build ticket" >&2; exit 2; }
+
 # The checked-out Lex tree supplies the publication tooling. The index itself may have been built
 # earlier, so preserve both commits rather than relabelling old bytes with today's source revision.
 publication_tool_commit=$(git -C lex rev-parse HEAD)
-git -C lex cat-file -e "$BUILD_CODE_COMMIT^{commit}" 2>/dev/null \
-  || { echo "ERROR: build code commit is not present in the Lex repository" >&2; exit 2; }
-git -C lex merge-base --is-ancestor "$BUILD_CODE_COMMIT" "$publication_tool_commit" \
-  || { echo "ERROR: build code commit is not an ancestor of publication tooling" >&2; exit 2; }
+[ "$publication_tool_commit" = "$BUILD_CODE_COMMIT" ] \
+  || { echo "ERROR: publication tooling does not match the ticketed Lex commit" >&2; exit 2; }
 
 index="index-$PUBLISHER.db"
 vectors="index-$PUBLISHER.vectors"
@@ -55,6 +75,10 @@ echo "=== resolve exact corpus and pinned embedding runtime ==="
 git clone --filter=blob:none "https://x-access-token:${GH_TOKEN}@github.com/${repo}.git" corpus
 git -C corpus checkout --detach "$CORPUS_COMMIT"
 test "$(git -C corpus rev-parse HEAD)" = "$CORPUS_COMMIT"
+git clone --filter=blob:none \
+  "https://x-access-token:${GH_TOKEN}@github.com/SFHAJJI/lex-articles.git" articles-ticket
+git -C articles-ticket checkout --detach "$ARTICLES_COMMIT"
+test "$(git -C articles-ticket rev-parse HEAD)" = "$ARTICLES_COMMIT"
 
 cp lex/deploy/embedding-model/model-manifest.json model-manifest.json
 model_revision=$(jq -r .revision model-manifest.json)
@@ -75,7 +99,8 @@ artifact_files=(--file "$index" --file "$vectors" --file model-manifest.json \
 release_assets=("$index" "$vectors" model-manifest.json model.onnx sentencepiece.bpe.model)
 verify_stamp_args=(--db "$index" --expected-collection "$PUBLISHER" \
   --expected-corpus-commit "$CORPUS_COMMIT" \
-  --expected-code-commit "$BUILD_CODE_COMMIT")
+  --expected-code-commit "$BUILD_CODE_COMMIT" \
+  --expected-articles-commit "$ARTICLES_COMMIT")
 if [ "$PUBLISHER" = "eu-eurlex" ]; then
   cp lex/src/Lex.Sources.EurLex/eu-scope.json eu-scope.json
   cp lex/config/eu-work-enrichment.json eu-work-enrichment.json
@@ -91,6 +116,7 @@ dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
   --root . "${artifact_files[@]}" --manifest "$manifest" \
   --key-id "$ARTIFACT_KEY_ID" --code-commit "$BUILD_CODE_COMMIT" \
   --source "collection=$PUBLISHER" --source "corpus_commit=$CORPUS_COMMIT" \
+  --source "articles_commit=$ARTICLES_COMMIT" --source "queue_commit=$QUEUE_COMMIT" \
   --source "publication_tool_commit=$publication_tool_commit" \
   --source "build_origin=hash-pinned-private-staging"
 digest=$(openssl dgst -sha256 -binary "$manifest" | openssl base64 -A)
@@ -123,6 +149,7 @@ dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
     --root . --file "$benchmark" --manifest "$benchmark_manifest" \
     --key-id "$ARTIFACT_KEY_ID" --code-commit "$publication_tool_commit" \
     --source "collection=$PUBLISHER" --source "corpus_commit=$CORPUS_COMMIT" \
+    --source "articles_commit=$ARTICLES_COMMIT" --source "queue_commit=$QUEUE_COMMIT" \
     --source "index_manifest_sha256=$manifest_id"
 benchmark_digest=$(openssl dgst -sha256 -binary "$benchmark_manifest" | openssl base64 -A)
 az keyvault key sign --vault-name "$AZURE_KEY_VAULT" --name "$AZURE_KEY_NAME" \
@@ -168,7 +195,8 @@ fi
 if [ "${DEPLOY_AFTER_PUBLISH:-0}" = "1" ]; then
   gh api repos/SFHAJJI/lex/dispatches -X POST \
     -f event_type=verified_artifact_release \
-    -F 'client_payload[require_manifest]=true'
+    -F 'client_payload[require_manifest]=true' \
+    -F 'client_payload[promote]=false'
 fi
 
 echo "published_manifest=$manifest_id"

@@ -5,14 +5,13 @@ on:
   workflow_dispatch:
     inputs:
       force_index_publisher:
-        description: "Rebuild one enabled publisher index even when its corpus is unchanged"
+        description: "Queue one enabled publisher index even when its corpus is unchanged"
         required: false
         type: string
 
 permissions:
   contents: write
   issues: write
-  id-token: write
 
 # A manual recovery run can overlap the next 02:17 schedule. Serialize them so two
 # writers never race on corpus heads, derived artifacts, release tags, or status.
@@ -25,63 +24,21 @@ jobs:
   fleet:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: SFHAJJI/lex
           path: lex
 
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           dotnet-version: 10.0.x
-
-      - name: restore legacy embedded-stamp key
-        env:
-          LEX_SIGNING_KEY: ${{ secrets.LEX_SIGNING_KEY }}
-        run: printf '%s' "$LEX_SIGNING_KEY" > signing-key.pem
-
-      - name: Azure login for non-exportable signing
-        if: vars.ARTIFACT_SIGNING_MODE == 'keyvault'
-        uses: azure/login@v3
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          allow-no-subscriptions: true
-
-      - name: verify Key Vault signing path
-        if: vars.ARTIFACT_SIGNING_MODE == 'keyvault'
-        shell: bash
-        env:
-          AZURE_KEY_VAULT: ${{ vars.AZURE_KEY_VAULT }}
-          AZURE_KEY_NAME: ${{ vars.AZURE_KEY_NAME }}
-        run: |
-          set -eu
-          : "${AZURE_KEY_VAULT:?AZURE_KEY_VAULT is required}"
-          : "${AZURE_KEY_NAME:?AZURE_KEY_NAME is required}"
-          digest=$(printf '%s' 'lex-keyvault-signing-preflight/1' \
-            | openssl dgst -sha256 -binary | openssl base64 -A)
-          signature=$(az keyvault key sign --vault-name "$AZURE_KEY_VAULT" \
-            --name "$AZURE_KEY_NAME" --algorithm ES256 --digest "$digest" -o json \
-            | jq -er 'if type == "string" then . else (.signature // .value // .result) end')
-          test -n "$signature"
-          verification=$(az keyvault key verify --vault-name "$AZURE_KEY_VAULT" \
-            --name "$AZURE_KEY_NAME" --algorithm ES256 --digest "$digest" \
-            --signature "$signature" -o json)
-          printf '%s' "$verification" | jq -e \
-            '(if type == "boolean" then . elif type == "string" then (ascii_downcase == "true") else (.value // .valid // .isValid // .is_valid // false) end) == true' \
-            >/dev/null
 
       - name: run fleet
         env:
           GH_TOKEN: ${{ secrets.LEX_OPS_TOKEN }}
-          DEPLOY_AFTER_PUBLISH: ${{ vars.DEPLOY_AFTER_PUBLISH }}
-          ARTIFACT_SIGNING_MODE: ${{ vars.ARTIFACT_SIGNING_MODE }}
-          ARTIFACT_KEY_ID: ${{ vars.ARTIFACT_KEY_ID }}
-          AZURE_KEY_VAULT: ${{ vars.AZURE_KEY_VAULT }}
-          AZURE_KEY_NAME: ${{ vars.AZURE_KEY_NAME }}
-          AZURE_INDEX_STORAGE_ACCOUNT: ${{ vars.AZURE_INDEX_STORAGE_ACCOUNT || 'stlexindexes' }}
-          INDEX_TIME_BUDGET_MINUTES: ${{ vars.INDEX_TIME_BUDGET_MINUTES || '300' }}
+          INDEX_BUILD_MODE: prebuilt
           FORCE_INDEX_PUBLISHER: ${{ inputs.force_index_publisher }}
         run: bash fleet.sh
 
@@ -89,7 +46,7 @@ jobs:
         if: always()
         run: |
           git config user.name "lex-ops"
-          git config user.email "haji.soufien@gmail.com"
+          git config user.email "26882784+SFHAJJI@users.noreply.github.com"
           git add status
           if ! git commit -m "fleet status $(date -u +%F)"; then
             echo "no status change"
@@ -113,5 +70,5 @@ jobs:
         run: |
           gh issue create --repo "$GITHUB_REPOSITORY" \
             --title "fleet-status: nightly failed $(date -u +%F)" \
-            --body "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID — check per-publisher status/ records." \
+            --body "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID - check per-publisher status/ records." \
             || true
