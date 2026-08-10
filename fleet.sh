@@ -7,6 +7,12 @@ STAMP="$(date -u +%FT%TZ)"
 mkdir -p status
 overall_rc=0
 FORCE_INDEX_PUBLISHER="${FORCE_INDEX_PUBLISHER:-}"
+INDEX_BUILD_MODE="${INDEX_BUILD_MODE:-prebuilt}"
+
+case "$INDEX_BUILD_MODE" in
+  hosted|prebuilt) ;;
+  *) echo "ERROR: INDEX_BUILD_MODE must be hosted or prebuilt" >&2; exit 2 ;;
+esac
 
 publish_blob_release() {
   local pub="$1" manifest_id="$2" corpus_commit="$3"
@@ -92,7 +98,7 @@ for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
         overall_rc=1
       elif [ -n "$(git -C "$dir" status --porcelain)" ]; then
         git -C "$dir" config user.name "lex-ops"
-        git -C "$dir" config user.email "haji.soufien@gmail.com"
+        git -C "$dir" config user.email "26882784+SFHAJJI@users.noreply.github.com"
         # Scoped adds only — never add -A.
         git -C "$dir" add works manifest.json NOTICE README.md 2>/dev/null
         git -C "$dir" commit -m "nightly ingest $STAMP" && git -C "$dir" push && outcome="ran_committed" || outcome="failed"
@@ -154,7 +160,7 @@ if git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/SFHAJJI/le
       derive_outcome="failed_nondeterminism"; overall_rc=1
     elif [ "$changed" -gt 0 ]; then
       git -C articles config user.name "lex-ops"
-      git -C articles config user.email "haji.soufien@gmail.com"
+      git -C articles config user.email "26882784+SFHAJJI@users.noreply.github.com"
       git -C articles add generation.json catalog.json lu-legilux eu-eurlex 2>/dev/null
       git -C articles commit -m "nightly derive $STAMP" && git -C articles push \
         && derive_outcome="ran_committed" || { derive_outcome="failed_push"; overall_rc=1; }
@@ -267,21 +273,33 @@ if [ "$derive_outcome" = "ran_committed" ] || [ "$derive_outcome" = "ran_no_chan
 
 fi
 
+queue='[]'
+lex_code_commit=$(git -C lex rev-parse HEAD)
+articles_commit=$(git -C articles rev-parse HEAD 2>/dev/null || true)
 if [ -f .index-queue ]; then
-  # The evidence verifier and derivation have already consumed publisher bodies. IndexFromCorpus
-  # reads only manifest/meta records plus the verified derived layer, so keeping duplicate XML,
-  # HTML, PDF and Formex working-tree bytes during index/vector construction only exhausts the
-  # ephemeral runner disk. Delete them from these throwaway clones, never from the source repos.
-  # Git metadata stays mounted so corpus_commit remains provable in the artifact manifest.
-  echo "=== reclaim ephemeral evidence working-tree space ==="
-  for corpus_dir in corpus-*; do
-    [ -d "$corpus_dir/works" ] || continue
-    find "$corpus_dir/works" -type f ! -name meta.json -delete
-    find "$corpus_dir/works" -depth -type d -empty -delete
-  done
-  # The article commit, if any, was already pushed. Indexing and dataset export need its files,
-  # not a second copy of their history in this disposable checkout.
-  rm -rf articles/.git
+  while read -r pub repo; do
+    [ -n "$pub" ] || continue
+    corpus_commit=$(git -C "corpus-$pub" rev-parse HEAD)
+    queue=$(jq --arg pub "$pub" --arg repo "$repo" --arg corpus "$corpus_commit" \
+      '. + [{collection:$pub,corpus_repo:$repo,corpus_commit:$corpus}]' <<<"$queue")
+  done < .index-queue
+fi
+jq -n --arg generated "$STAMP" --arg mode "$INDEX_BUILD_MODE" \
+  --arg code "$lex_code_commit" --arg articles "$articles_commit" --argjson entries "$queue" \
+  '{schema:"lex-index-build-queue/1",generated_at:$generated,mode:$mode,
+    build_code_commit:$code,articles_commit:$articles,entries:$entries}' \
+  > status/index-queue.json
+
+if [ "$INDEX_BUILD_MODE" = "prebuilt" ] && [ -f .index-queue ]; then
+  echo "=== index builds deferred to the hash-pinned local prebuilt path ==="
+  jq -r '.entries[] | "--- \(.collection): awaiting local build at corpus \(.corpus_commit)"' \
+    status/index-queue.json
+  rm -f .index-queue
+fi
+
+if [ -f .index-queue ]; then
+  # Release identity is enforced from the exact clean corpus and derived Git checkouts. Hosted
+  # mode is an explicit diagnostic option and must not delete or mutate either input to save disk.
   df -h .
 
   published_artifacts=0
@@ -318,16 +336,17 @@ if [ -f .index-queue ]; then
   echo "=== index budget: ${index_time_budget_minutes} minutes (reporting only; no automatic cancellation) ==="
   while read -r pub repo; do
     echo "=== index ($pub) ==="
+    corpus_commit=$(git -C "corpus-$pub" rev-parse HEAD)
     index_args=(--corpus "corpus-$pub" --articles articles --out "index-$pub.db" \
       --keyfile signing-key.pem --embedding-model . --vectors "index-$pub.vectors" \
       --time-budget-minutes "$index_time_budget_minutes" \
-      --code-commit "$lex_code_commit")
+      --code-commit "$lex_code_commit" --articles-commit "$articles_commit" \
+      --corpus-commit "$corpus_commit")
     if [ "$pub" = "eu-eurlex" ]; then
       cp lex/config/eu-work-enrichment.json eu-work-enrichment.json
       index_args+=(--work-enrichment eu-work-enrichment.json)
     fi
     if dotnet run --project lex/src/Lex.Ingest -c Release -- index "${index_args[@]}"; then
-      corpus_commit=$(git -C "corpus-$pub" rev-parse HEAD)
       manifest="index-$pub.manifest.json"
       signature="index-$pub.manifest.sig"
       artifact_files=(--file "index-$pub.db" --file "index-$pub.vectors" \
@@ -336,7 +355,8 @@ if [ -f .index-queue ]; then
         model.onnx sentencepiece.bpe.model)
       verify_stamp_args=(--db "index-$pub.db" --expected-collection "$pub" \
         --expected-corpus-commit "$corpus_commit" \
-        --expected-code-commit "$lex_code_commit")
+        --expected-code-commit "$lex_code_commit" \
+        --expected-articles-commit "$articles_commit")
       if [ "$pub" = "eu-eurlex" ]; then
         cp lex/src/Lex.Sources.EurLex/eu-scope.json eu-scope.json
         artifact_files+=(--file eu-scope.json --file eu-work-enrichment.json)
@@ -355,7 +375,8 @@ if [ -f .index-queue ]; then
         if ! dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
              --root . "${artifact_files[@]}" --manifest "$manifest" \
              --key-id "$ARTIFACT_KEY_ID" --code-commit "$lex_code_commit" \
-             --source "collection=$pub" --source "corpus_commit=$corpus_commit"; then
+             --source "collection=$pub" --source "corpus_commit=$corpus_commit" \
+             --source "articles_commit=$articles_commit"; then
           echo "--- $pub: failed_manifest"; overall_rc=1; continue
         fi
         # Azure CLI accepts the digest as padded standard base64. Its signature result is
@@ -370,7 +391,8 @@ if [ -f .index-queue ]; then
       elif ! dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
            --root . "${artifact_files[@]}" --manifest "$manifest" --signature "$signature" \
            --keyfile signing-key.pem --key-id legacy-index-2026 --code-commit "$lex_code_commit" \
-           --source "collection=$pub" --source "corpus_commit=$corpus_commit"; then
+           --source "collection=$pub" --source "corpus_commit=$corpus_commit" \
+           --source "articles_commit=$articles_commit"; then
         echo "--- $pub: failed_manifest"; overall_rc=1; continue
       fi
       if ! dotnet run --project lex/src/Lex.Ingest -c Release -- artifact verify \
@@ -399,6 +421,7 @@ if [ -f .index-queue ]; then
                --root . --file "$benchmark" --manifest "$benchmark_manifest" \
                --key-id "$ARTIFACT_KEY_ID" --code-commit "$lex_code_commit" \
                --source "collection=$pub" --source "corpus_commit=$corpus_commit" \
+               --source "articles_commit=$articles_commit" \
                --source "index_manifest_sha256=$manifest_id"; then
           echo "--- $pub: failed_benchmark_manifest"; overall_rc=1; continue
         fi
@@ -414,6 +437,7 @@ if [ -f .index-queue ]; then
              --signature "$benchmark_signature" --keyfile signing-key.pem \
              --key-id legacy-index-2026 --code-commit "$lex_code_commit" \
              --source "collection=$pub" --source "corpus_commit=$corpus_commit" \
+             --source "articles_commit=$articles_commit" \
              --source "index_manifest_sha256=$manifest_id"; then
         echo "--- $pub: failed_benchmark_manifest"; overall_rc=1; continue
       fi
@@ -479,6 +503,7 @@ if [ -f .index-queue ]; then
     gh api repos/SFHAJJI/lex/dispatches -X POST \
       -f event_type=verified_artifact_release \
       -F 'client_payload[require_manifest]=true' \
+      -F 'client_payload[promote]=false' \
       || { echo "--- deploy dispatch failed"; overall_rc=1; }
   elif [ "$published_artifacts" = "1" ] && [ "$deployment_blocked" != "0" ]; then
     echo "--- Container App deployment skipped: one or more artifacts are Blob-only"

@@ -1,10 +1,10 @@
-# lex-ops — fleet operations
+# lex-ops - fleet operations
 
 The hub of the hub-and-spoke ops layer (spec §11), running in **N-small
 centralized mode** (§11.5): one nightly workflow ingests every enabled
-publisher, applies the pre-commit anomaly gate, pushes corpus commits, rebuilds
-and signs indexes, uploads release assets, and writes the fleet's three-state
-status (`ran_no_change` / `ran_committed` / `failed_*`) — one status commit per
+publisher, applies the pre-commit anomaly gate, pushes corpus and derived commits,
+records exact index-build inputs, and writes the fleet's three-state
+status (`ran_no_change` / `ran_committed` / `failed_*`) - one status commit per
 night, never a heartbeat in a corpus repo.
 
 Workflow concurrency is serialized without preemption. If a manual recovery run overlaps the
@@ -20,14 +20,15 @@ head during recovery. It also suppresses the normal stale-index sweep and queues
 publisher. Invalid or disabled ids fail before cloning, and integrity or derivation failures cannot
 be forced past the publication gates.
 
-- `publishers.json` — the fleet registry.
-- `fleet.sh` — the runner.
-- `status/` — per-publisher status records (the freshness feed).
+- `publishers.json` - the fleet registry.
+- `fleet.sh` - the runner.
+- `status/` - per-publisher status records (the freshness feed).
+- `status/index-queue.json` - exact corpus, derived and Lex commits awaiting a local index build.
 - `LEX_OPS_TOKEN` authorizes cross-repository pushes. It is an interim OAuth token and must be
   replaced with a GitHub App installation token by the third publisher or 90 days, whichever
   comes first (spec §11.1).
-- `LEX_SIGNING_KEY` signs only the embedded compatibility stamp during the rollback window. It is
-  not the trust root for released artifacts.
+- `LEX_SIGNING_KEY` is retained, unused by enabled workflows, only for the dated rollback window.
+  It is not the trust root for released artifacts.
 
 Every index published by the current pipeline travels with a signed `lex-artifacts/1` manifest. The manifest binds
 the complete release file list, hashes, sizes, code commit and corpus commit to the public key
@@ -53,34 +54,35 @@ when that deterministic input identity changes. This allows a failed run to resu
 publication and allows an intentional versioned extraction profile to regenerate results, while
 identical inputs producing a diff still fail as nondeterminism.
 
-Production publication uses `ARTIFACT_SIGNING_MODE=keyvault`. GitHub Actions authenticates through
-the production OIDC environment, and Azure Key Vault signs each canonical manifest with the
-non-exportable P-256 key. The private key never enters the runner. The publisher identity has only
-the Key Vault `Get`, `Sign` and `Verify` permissions and no subscription role. Immediately after
-OIDC login, the workflow signs and verifies a fixed test digest so authorization or digest-encoding
-drift fails before the long fleet run begins.
+The public nightly never receives a signing key, logs into Azure, downloads the embedding model or
+attempts the long index build. It records `status/index-queue.json` from exact public Git commits.
+The deterministic index is built locally from those commits and uploaded to private staging. The
+short `publish-prebuilt-index` workflow then authenticates with GitHub OIDC and uses the
+non-exportable P-256 Key Vault key to verify, benchmark, sign and publish it. The publisher identity
+has only the permissions needed for private staging and manifest signing.
 
-`DEPLOY_AFTER_PUBLISH=1` dispatches the Lex deployment workflow only after at least one artifact
-set was built, signed, verified and uploaded successfully. The deployment builds an immutable
-image identified by the code and artifact-manifest hashes, creates a zero-traffic Container Apps
-revision, runs health, MCP and assistant smoke tests, and only then promotes traffic. The previous
-revision remains available for immediate rollback.
+`DEPLOY_AFTER_PUBLISH=1` dispatches the Lex deployment workflow only after an artifact set was
+verified, signed and uploaded successfully. The deployment builds an immutable image identified by
+the code and artifact-manifest hashes, creates a zero-traffic Container Apps revision, and runs
+health, MCP and assistant smoke tests. Traffic remains unchanged. Promotion or rollback is a
+separate explicit operation naming both the expected current revision and the exact target.
 
 If a hosted runner deadline interrupts a large build but a trusted local or self-hosted builder
 finishes it, `publish-prebuilt-index` promotes those bytes without bypassing the same gates. The
 operator first uploads the DB and vector file to a private `staging/<publisher>/...` Blob prefix,
-then dispatches the workflow with their SHA-256 values and the exact corpus commit. The OIDC runner
-re-downloads and checks the bytes, verifies that the index stamp binds the exact collection,
-corpus commit, Lex build commit, content digest and reviewed enrichment, resolves the pinned model
+then dispatches the workflow with their SHA-256 values and the exact lex-ops commit containing the
+build ticket. The OIDC runner re-downloads and checks the bytes, verifies that the index stamp binds
+the ticket's exact collection, corpus commit, derived-articles commit, Lex build commit, content
+digest and reviewed enrichment, resolves the pinned model
 and scope, creates the whole-artifact manifest, signs it with Key Vault, runs the public benchmark,
 and only then updates the immutable Blob/GitHub releases and deployment pointer. Staging is never a
 runtime source, and unsigned, mislabelled or hash-mismatched artifacts cannot be promoted.
 
-The normal Fleet run remains the default for routine updates. Use the prebuilt path when the same
-deterministic index build has exceeded, or is expected to exceed, the six-hour hosted-runner window.
-Do not use `force_index_publisher` merely to repeat a build that cannot fit that window: build from
-the exact committed corpus and Lex revisions locally, upload only the DB and vector artifacts, and
-let `publish-prebuilt-index` perform provenance checks, signing, benchmarking and deployment.
+The normal Fleet run remains the default for routine acquisition and derivation. Index construction
+always follows the prebuilt path because the measured build exceeds the hosted-runner window. Do not
+use `force_index_publisher` merely to repeat that long build: use the commits in
+`status/index-queue.json`, upload only the DB and vector artifacts, and let
+`publish-prebuilt-index` perform provenance checks, signing, benchmarking and candidate deployment.
 
 During the dual-reader rollback window, `LEX_SIGNING_KEY` still signs only the index's embedded
 compatibility stamp. The application does not trust that adjacent public key. Runtime trust comes
@@ -89,6 +91,6 @@ The legacy secret is eligible for removal only after 30 stable production days, 
 2026-09-05, and only after the retained rollback revision no longer needs it.
 
 When the fleet grows past a couple of publishers, this migrates to the
-dispatch/fan-out shape in spec §10.1 — per-corpus-repo workflows triggered via
+dispatch/fan-out shape in spec §10.1 - per-corpus-repo workflows triggered via
 `workflow_dispatch`, status via run artifacts. The status model and gates stay
 identical; only the execution topology changes.

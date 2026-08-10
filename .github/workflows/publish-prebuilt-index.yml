@@ -14,12 +14,8 @@ on:
         description: Private Blob prefix containing the prebuilt DB and vector file
         required: true
         type: string
-      corpus_commit:
-        description: Full corpus Git commit used to build the index
-        required: true
-        type: string
-      build_code_commit:
-        description: Full Lex Git commit that built the prebuilt index
+      queue_commit:
+        description: Full lex-ops main commit containing the immutable index-build ticket
         required: true
         type: string
       index_sha256:
@@ -41,23 +37,59 @@ concurrency:
 
 jobs:
   publish:
+    if: github.ref == 'refs/heads/main'
+    environment: production
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
 
-      - uses: actions/checkout@v6
+      - name: Resolve immutable build ticket
+        id: ticket
+        shell: bash
+        env:
+          QUEUE_COMMIT: ${{ inputs.queue_commit }}
+          PUBLISHER: ${{ inputs.publisher }}
+        run: |
+          set -euo pipefail
+          [[ "$QUEUE_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::queue commit must be a full lowercase SHA"; exit 2; }
+          git cat-file -e "$QUEUE_COMMIT^{commit}"
+          git merge-base --is-ancestor "$QUEUE_COMMIT" refs/remotes/origin/main \
+            || { echo "::error::queue commit is not on the deployed main history"; exit 2; }
+          ticket=$(git show "$QUEUE_COMMIT:status/index-queue.json")
+          printf '%s' "$ticket" | jq -e \
+            --arg pub "$PUBLISHER" \
+            '.schema == "lex-index-build-queue/1"
+             and .mode == "prebuilt"
+             and (.build_code_commit | test("^[0-9a-f]{40}$"))
+             and (.articles_commit | test("^[0-9a-f]{40}$"))
+             and ([.entries[] | select(.collection == $pub)] | length == 1)' >/dev/null
+          repo=$(jq -er --arg pub "$PUBLISHER" \
+            '.publishers[] | select(.enabled and .id == $pub) | .corpus_repo' publishers.json)
+          ticket_repo=$(printf '%s' "$ticket" | jq -er --arg pub "$PUBLISHER" \
+            '.entries[] | select(.collection == $pub) | .corpus_repo')
+          [ "$repo" = "$ticket_repo" ] \
+            || { echo "::error::ticket corpus repository does not match the registry"; exit 2; }
+          echo "build_code_commit=$(printf '%s' "$ticket" | jq -er .build_code_commit)" >> "$GITHUB_OUTPUT"
+          echo "articles_commit=$(printf '%s' "$ticket" | jq -er .articles_commit)" >> "$GITHUB_OUTPUT"
+          echo "corpus_commit=$(printf '%s' "$ticket" | jq -er --arg pub "$PUBLISHER" '.entries[] | select(.collection == $pub) | .corpus_commit')" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: SFHAJJI/lex
           path: lex
           fetch-depth: 0
+          ref: ${{ steps.ticket.outputs.build_code_commit }}
 
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           dotnet-version: 10.0.x
 
       - name: Azure login for private staging and non-exportable signing
-        uses: azure/login@v3
+        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -68,8 +100,10 @@ jobs:
           GH_TOKEN: ${{ secrets.LEX_OPS_TOKEN }}
           PUBLISHER: ${{ inputs.publisher }}
           STAGING_PREFIX: ${{ inputs.staging_prefix }}
-          CORPUS_COMMIT: ${{ inputs.corpus_commit }}
-          BUILD_CODE_COMMIT: ${{ inputs.build_code_commit }}
+          QUEUE_COMMIT: ${{ inputs.queue_commit }}
+          CORPUS_COMMIT: ${{ steps.ticket.outputs.corpus_commit }}
+          BUILD_CODE_COMMIT: ${{ steps.ticket.outputs.build_code_commit }}
+          ARTICLES_COMMIT: ${{ steps.ticket.outputs.articles_commit }}
           EXPECTED_INDEX_SHA256: ${{ inputs.index_sha256 }}
           EXPECTED_VECTORS_SHA256: ${{ inputs.vectors_sha256 }}
           ARTIFACT_KEY_ID: ${{ vars.ARTIFACT_KEY_ID }}
