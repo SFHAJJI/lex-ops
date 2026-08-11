@@ -48,8 +48,26 @@ jobs:
           [[ "$CANDIDATE_REVISION" =~ ^ca-lex-web--[a-z0-9-]+$ ]] \
             || { echo "::error::invalid candidate revision"; exit 2; }
           gh release view "$EVALUATION_RELEASE" --json isDraft,assets \
-            --jq '.isDraft == true and (.assets | length == 4)' | grep -qx true \
-            || { echo "::error::evaluation release is not the exact four-file draft"; exit 2; }
+            --jq '
+              .isDraft == true
+              and (([.assets[].name] | length) >= 4)
+              and (([.assets[].name] | length) <= 7)
+              and (([
+                "assistant-eval-report.json",
+                "assistant-cases-v3.json",
+                "assistant-cases-v3.review.json",
+                "assistant-cases-v3.review.sig"
+              ] - [.assets[].name]) | length == 0)
+              and (([.assets[].name] - [
+                "assistant-eval-report.json",
+                "assistant-cases-v3.json",
+                "assistant-cases-v3.review.json",
+                "assistant-cases-v3.review.sig",
+                "assistant-browser-evidence.json",
+                "assistant-eval.manifest.json",
+                "assistant-eval.manifest.sig"
+              ]) | length == 0)' | grep -qx true \
+            || { echo "::error::evaluation release is not an exact retry-safe draft"; exit 2; }
           mkdir evidence
           gh release download "$EVALUATION_RELEASE" --dir evidence \
             --pattern 'assistant-eval-report.json' \
@@ -214,7 +232,8 @@ jobs:
           az keyvault key sign --vault-name "$AZURE_KEY_VAULT" \
             --name "$AZURE_KEY_NAME" --version "$AZURE_KEY_VERSION" \
             --algorithm ES256 --digest "$digest" -o json \
-            | jq -er '.signature' > evidence/assistant-eval.manifest.sig
+            | jq -er 'if type == "string" then . else (.signature // .value // .result) end' \
+            > evidence/assistant-eval.manifest.sig
 
           dotnet run --project lex/src/Lex.Ingest/Lex.Ingest.csproj -c Release -- \
             assistant-eval verify-release \
@@ -229,7 +248,8 @@ jobs:
           gh release upload "$EVALUATION_RELEASE" \
             evidence/assistant-browser-evidence.json \
             evidence/assistant-eval.manifest.json \
-            evidence/assistant-eval.manifest.sig
+            evidence/assistant-eval.manifest.sig \
+            --clobber
           gh release edit "$EVALUATION_RELEASE" --draft=false --latest=false \
             --title "Lex assistant evaluation ${code_commit:0:12}" \
             --notes "Signed production release evidence for candidate revision $CANDIDATE_REVISION. Promotion independently revalidates this package against Azure and the live candidate attestation."
