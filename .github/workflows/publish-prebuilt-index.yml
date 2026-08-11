@@ -15,7 +15,7 @@ on:
         required: true
         type: string
       queue_commit:
-        description: Full lex-ops main commit containing the immutable index-build ticket
+        description: Full lex-ops fleet-status commit containing the immutable index-build ticket
         required: true
         type: string
       index_sha256:
@@ -56,9 +56,11 @@ jobs:
           set -euo pipefail
           [[ "$QUEUE_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
             || { echo "::error::queue commit must be a full lowercase SHA"; exit 2; }
+          git fetch --no-tags origin \
+            +refs/heads/fleet-status:refs/remotes/origin/fleet-status
           git cat-file -e "$QUEUE_COMMIT^{commit}"
-          git merge-base --is-ancestor "$QUEUE_COMMIT" refs/remotes/origin/main \
-            || { echo "::error::queue commit is not on the deployed main history"; exit 2; }
+          git merge-base --is-ancestor "$QUEUE_COMMIT" refs/remotes/origin/fleet-status \
+            || { echo "::error::queue commit is not on the generated fleet-status history"; exit 2; }
           ticket=$(git show "$QUEUE_COMMIT:status/index-queue.json")
           printf '%s' "$ticket" | jq -e \
             --arg pub "$PUBLISHER" \

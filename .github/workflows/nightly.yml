@@ -39,6 +39,9 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
+      - name: hydrate generated Fleet state
+        run: bash fleet-status.sh hydrate
+
       - name: run fleet
         env:
           GH_TOKEN: ${{ secrets.LEX_OPS_TOKEN }}
@@ -46,26 +49,9 @@ jobs:
           FORCE_INDEX_PUBLISHER: ${{ inputs.force_index_publisher }}
         run: bash fleet.sh
 
-      - name: commit status (one commit per night, never into corpus repos)
+      - name: publish status (one commit per night, never into code or corpus branches)
         if: always()
-        run: |
-          git config user.name "lex-ops"
-          git config user.email "26882784+SFHAJJI@users.noreply.github.com"
-          git add status
-          if ! git commit -m "fleet status $(date -u +%F)"; then
-            echo "no status change"
-            exit 0
-          fi
-          for attempt in 1 2 3; do
-            git fetch origin main
-            if git rebase origin/main && git push origin HEAD:main; then
-              exit 0
-            fi
-            git rebase --abort || true
-            if [ "$attempt" -lt 3 ]; then sleep $((attempt * 2)); fi
-          done
-          echo "status commit could not be published after three attempts"
-          exit 1
+        run: bash fleet-status.sh publish
 
       - name: fleet-status issue on failure
         if: failure()

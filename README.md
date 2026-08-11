@@ -4,14 +4,15 @@ The hub of the hub-and-spoke ops layer (spec §11), running in **N-small
 centralized mode** (§11.5): one nightly workflow ingests every enabled
 publisher, applies the pre-commit anomaly gate, pushes corpus and derived commits,
 records exact index-build inputs, and writes the fleet's three-state
-status (`ran_no_change` / `ran_committed` / `failed_*`) - one status commit per
-night, never a heartbeat in a corpus repo.
+status (`ran_no_change` / `ran_committed` / `failed_*`) - one generated commit per
+night on `fleet-status`, never a heartbeat in a code or corpus branch.
 
 Workflow concurrency is serialized without preemption. If a manual recovery run overlaps the
 02:17 schedule, the scheduled run waits rather than racing the active publisher, article, release,
 or status writers. The active run is never canceled merely because a newer trigger arrived.
-The final status-only commit rebases onto the current `main` and retries a bounded three times, so
-an unrelated operations change made during a long Fleet run does not silently discard its status.
+The workflow hydrates `status/` from the fast-forward-only `fleet-status` branch before each run,
+then publishes a status-only commit there with a bounded retry. `main` remains PR-protected and
+contains executable operations code only; a long Fleet run never needs to bypass that protection.
 
 If an index build is interrupted after corpus and article commits land, dispatch the workflow with
 `force_index_publisher` set to that enabled publisher id (for example, `eu-eurlex`). Fleet still
@@ -22,8 +23,9 @@ be forced past the publication gates.
 
 - `publishers.json` - the fleet registry.
 - `fleet.sh` - the runner.
-- `status/` - per-publisher status records (the freshness feed).
-- `status/index-queue.json` - exact corpus, derived and Lex commits awaiting a local index build.
+- `status/` - per-publisher status records (the freshness feed, published on `fleet-status`).
+- `status/index-queue.json` - exact corpus, derived and Lex commits awaiting a local index build,
+  read from an immutable `fleet-status` commit.
 - `LEX_OPS_TOKEN` authorizes cross-repository pushes. It is an interim OAuth token and must be
   replaced with a GitHub App installation token by the third publisher or 90 days, whichever
   comes first (spec §11.1).
@@ -61,6 +63,11 @@ read block. Fleet rejects a row above that documented ceiling instead of growing
 bound or silently omitting legal text. Each release tag is addressed by the exact `lex-articles`
 commit. A failed export is therefore retried even after the derived commit has already landed,
 while a complete release for the current commit makes later no-change nights a cheap skip.
+
+The generated status branch is coordination state, not a release trust root. Publication also
+requires every ticketed Lex, corpus and derived-article commit to belong to its protected `main`
+history, re-verifies the staged hashes and embedded stamp, and requires the production environment
+before Key Vault signing.
 
 The public nightly never receives a signing key, logs into Azure, downloads the embedding model or
 attempts the long index build. It records `status/index-queue.json` from exact public Git commits.
