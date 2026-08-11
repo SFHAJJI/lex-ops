@@ -32,8 +32,20 @@ class DatasetToParquetTests(unittest.TestCase):
             with gzip.open(source, "wb") as stream:
                 stream.write(b"x" * 65 + b"\n")
 
-            with self.assertRaisesRegex(ValueError, "row 1 exceeds the 64-byte"):
+            with self.assertRaisesRegex(ValueError, "object on row 1 exceeds the 64-byte"):
                 validate_rows(source, maximum_row_bytes=64)
+
+    def test_row_ceiling_excludes_line_delimiters(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            lf = Path(root) / "lf.jsonl.gz"
+            crlf = Path(root) / "crlf.jsonl.gz"
+            with gzip.open(lf, "wb") as stream:
+                stream.write(b"x" * 64 + b"\n")
+            with gzip.open(crlf, "wb") as stream:
+                stream.write(b"x" * 64 + b"\r\n")
+
+            self.assertEqual(1, validate_rows(lf, maximum_row_bytes=64))
+            self.assertEqual(1, validate_rows(crlf, maximum_row_bytes=64))
 
     def test_date_like_values_remain_strings_across_streaming_batches(self) -> None:
         with tempfile.TemporaryDirectory() as root:

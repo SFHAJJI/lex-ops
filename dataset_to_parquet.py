@@ -41,19 +41,22 @@ DATASET_SCHEMA = pyarrow.schema((column, pyarrow.string()) for column in DATASET
 
 
 def validate_rows(path: Path, maximum_row_bytes: int = MAXIMUM_JSON_ROW_BYTES) -> int:
-    """Fail before conversion when one JSON object exceeds the declared row ceiling."""
+    """Fail when one JSON object, excluding its LF or CRLF delimiter, exceeds the ceiling."""
 
     rows = 0
     opener = gzip.open if path.suffix == ".gz" else open
     with opener(path, "rb") as source:
         while True:
-            row = source.readline(maximum_row_bytes + 1)
+            # Read enough to distinguish an exactly-at-limit object followed by CRLF from an
+            # over-limit object, while keeping the validation allocation itself bounded.
+            row = source.readline(maximum_row_bytes + 3)
             if not row:
                 return rows
             rows += 1
-            if len(row) > maximum_row_bytes:
+            delimiter_bytes = 2 if row.endswith(b"\r\n") else 1 if row.endswith(b"\n") else 0
+            if len(row) - delimiter_bytes > maximum_row_bytes:
                 raise ValueError(
-                    f"{path}: JSONL row {rows} exceeds the "
+                    f"{path}: JSON object on row {rows} exceeds the "
                     f"{maximum_row_bytes}-byte dataset ceiling"
                 )
 

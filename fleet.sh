@@ -522,7 +522,13 @@ if [ "$derive_outcome" = "ran_committed" ]; then
       || python3 -m pip install --quiet --break-system-packages pyarrow==25.0.0 || dataset_ok=0
   fi
   if [ "$dataset_ok" = 1 ]; then
-    python3 dataset_to_parquet.py dataset/*-provisions.jsonl.gz || dataset_ok=0
+    dataset_inputs=(dataset/*-provisions.jsonl.gz)
+    if [ ! -e "${dataset_inputs[0]}" ]; then
+      echo "ERROR: dataset generation produced no provision JSONL files" >&2
+      dataset_ok=0
+    elif ! python3 dataset_to_parquet.py "${dataset_inputs[@]}"; then
+      dataset_ok=0
+    fi
   fi
   if [ "$dataset_ok" = 1 ]; then
     tag="dataset-$(date -u +%F)"
