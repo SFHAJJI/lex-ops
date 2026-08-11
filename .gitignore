@@ -2,3 +2,5 @@
 *.db
 corpus-*/
 lex/
+__pycache__/
+*.py[cod]
