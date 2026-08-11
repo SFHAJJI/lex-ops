@@ -1,0 +1,269 @@
+name: publish-assistant-evaluation
+
+on:
+  workflow_dispatch:
+    inputs:
+      evaluation_release:
+        description: Exact draft assistant-evaluation release tag
+        required: true
+        type: string
+      candidate_revision:
+        description: Exact zero-traffic Container Apps revision evaluated
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: assistant-evaluation-${{ inputs.evaluation_release }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EVALUATION_RELEASE: ${{ inputs.evaluation_release }}
+      CANDIDATE_REVISION: ${{ inputs.candidate_revision }}
+      RESOURCE_GROUP: rg-platform
+      CONTAINER_APP: ca-lex-web
+      AZURE_KEY_VAULT: ${{ vars.AZURE_KEY_VAULT }}
+      AZURE_KEY_NAME: ${{ vars.AZURE_KEY_NAME }}
+      AZURE_KEY_VERSION: ${{ vars.AZURE_KEY_VERSION }}
+      ARTIFACT_KEY_ID: ${{ vars.ARTIFACT_KEY_ID }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Download the exact draft evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EVALUATION_RELEASE" =~ ^assistant-eval-[0-9a-f]{12}-[0-9a-f]{12}$ ]] \
+            || { echo "::error::invalid evaluation release tag"; exit 2; }
+          [[ "$CANDIDATE_REVISION" =~ ^ca-lex-web--[a-z0-9-]+$ ]] \
+            || { echo "::error::invalid candidate revision"; exit 2; }
+          gh release view "$EVALUATION_RELEASE" --json isDraft,assets \
+            --jq '.isDraft == true and (.assets | length == 4)' | grep -qx true \
+            || { echo "::error::evaluation release is not the exact four-file draft"; exit 2; }
+          mkdir evidence
+          gh release download "$EVALUATION_RELEASE" --dir evidence \
+            --pattern 'assistant-eval-report.json' \
+            --pattern 'assistant-cases-v3.json' \
+            --pattern 'assistant-cases-v3.review.json' \
+            --pattern 'assistant-cases-v3.review.sig'
+          test "$(find evidence -maxdepth 1 -type f | wc -l)" -eq 4
+          code_commit=$(jq -er '.identity.target.code_commit
+            | select(test("^[0-9a-f]{40}$"))' evidence/assistant-eval-report.json)
+          report_revision=$(jq -er '.identity.target.revision_name'
+            evidence/assistant-eval-report.json)
+          [ "$report_revision" = "$CANDIDATE_REVISION" ] \
+            || { echo "::error::report revision does not match dispatch"; exit 2; }
+          report_sha=$(sha256sum evidence/assistant-eval-report.json | cut -d' ' -f1)
+          expected_tag="assistant-eval-${code_commit:0:12}-${report_sha:0:12}"
+          [ "$EVALUATION_RELEASE" = "$expected_tag" ] \
+            || { echo "::error::release tag does not bind report bytes and code"; exit 2; }
+          echo "code_commit=$code_commit" >> "$GITHUB_ENV"
+
+      - name: Check out the exact evaluated Lex commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none https://github.com/SFHAJJI/lex.git lex
+          git -C lex checkout --detach "$code_commit"
+          test "$(git -C lex rev-parse HEAD)" = "$code_commit"
+
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 10.0.x
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: lex/web/package-lock.json
+
+      - name: Install the exact browser evaluation runtime
+        working-directory: lex/web
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Require production signer configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          for value in AZURE_KEY_VAULT AZURE_KEY_NAME AZURE_KEY_VERSION ARTIFACT_KEY_ID; do
+            [ -n "${!value:-}" ] || { echo "::error::$value is not configured"; exit 1; }
+          done
+          [[ "$AZURE_KEY_VERSION" =~ ^[0-9a-f]{32}$ ]] \
+            || { echo "::error::artifact key version is invalid"; exit 1; }
+          git -C lex merge-base --is-ancestor "$code_commit" refs/remotes/origin/main \
+            || { echo "::error::evaluated code is not on Lex main"; exit 2; }
+
+      - name: Azure login for authenticated evidence and non-exportable signing
+        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Authenticate, sign, verify, and publish the evidence
+        id: publish
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          candidate_owned=false
+          cleanup_candidate() {
+            local attempt active
+            [ "$candidate_owned" = "true" ] || return 0
+            for attempt in 1 2 3 4 5; do
+              az containerapp revision deactivate -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+                --revision "$CANDIDATE_REVISION" >/dev/null 2>&1 || true
+              active=$(az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+                --revision "$CANDIDATE_REVISION" --query properties.active -o tsv 2>/dev/null || true)
+              [ "$active" = "false" ] && return 0
+              sleep "$attempt"
+            done
+            echo "::error::candidate revision could not be returned to inactive state"
+            return 1
+          }
+          finish() {
+            local status=$?
+            trap - EXIT TERM INT
+            cleanup_candidate || status=1
+            exit "$status"
+          }
+          trap finish EXIT TERM INT
+          app_id=$(az containerapp show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+            --query id -o tsv)
+          candidate_fqdn=$(az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+            --revision "$CANDIDATE_REVISION" --query properties.fqdn -o tsv)
+          candidate_traffic=$(az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+            --revision "$CANDIDATE_REVISION" --query properties.trafficWeight -o tsv)
+          [ -n "$app_id" ] && [ -n "$candidate_fqdn" ] \
+            || { echo "::error::candidate identity is incomplete"; exit 1; }
+          [ "$candidate_traffic" = "0" ] \
+            || { echo "::error::assistant evaluation must run against a zero-traffic candidate"; exit 1; }
+          candidate_active=$(az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+            --revision "$CANDIDATE_REVISION" --query properties.active -o tsv)
+          [ "$candidate_active" = "false" ] \
+            || { echo "::error::publication must own activation of an inactive candidate"; exit 1; }
+          candidate_owned=true
+          echo "candidate_owned=true" >> "$GITHUB_OUTPUT"
+          az containerapp revision activate -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+            --revision "$CANDIDATE_REVISION" >/dev/null
+          for attempt in {1..20}; do
+            running=$(az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+              --revision "$CANDIDATE_REVISION" --query properties.runningState -o tsv)
+            [ "$running" = "Running" ] && break
+            [ "$attempt" = "20" ] \
+              && { echo "::error::candidate revision did not become ready"; exit 1; }
+            sleep 3
+          done
+
+          dotnet run --project lex/src/Lex.Ingest/Lex.Ingest.csproj -c Release -- \
+            assistant-eval verify-report \
+            --report evidence/assistant-eval-report.json \
+            --cases evidence/assistant-cases-v3.json \
+            --review-attestation evidence/assistant-cases-v3.review.json \
+            --review-signature evidence/assistant-cases-v3.review.sig \
+            --base-url "https://$candidate_fqdn" \
+            --candidate-container-app-resource-id "$app_id" \
+            --candidate-revision "$CANDIDATE_REVISION"
+
+          target_manifest_set=$(jq -er '.identity.target.artifact_manifest_set'
+            evidence/assistant-eval-report.json)
+          target_evidence=$(jq -er '.identity.target.evidence_sha256'
+            evidence/assistant-eval-report.json)
+          cases_sha=$(jq -er '.cases_sha256' evidence/assistant-eval-report.json)
+          report_schema=$(jq -er '.schema' evidence/assistant-eval-report.json)
+          export LEX_BROWSER_BASE_URL="https://$candidate_fqdn"
+          export LEX_BROWSER_EVIDENCE_OUT="$GITHUB_WORKSPACE/evidence/assistant-browser-evidence.json"
+          export LEX_CANDIDATE_REVISION="$CANDIDATE_REVISION"
+          export LEX_CODE_COMMIT="$code_commit"
+          export LEX_ARTIFACT_MANIFEST_SET="$target_manifest_set"
+          export LEX_CANDIDATE_EVIDENCE_SHA256="$target_evidence"
+          npm --prefix lex/web run test:browser-release
+          test -s evidence/assistant-browser-evidence.json
+          browser_evidence_sha=$(sha256sum evidence/assistant-browser-evidence.json | cut -d' ' -f1)
+          dotnet run --project lex/src/Lex.Ingest/Lex.Ingest.csproj -c Release -- \
+            artifact manifest --root evidence \
+            --file assistant-eval-report.json \
+            --file assistant-cases-v3.json \
+            --file assistant-cases-v3.review.json \
+            --file assistant-cases-v3.review.sig \
+            --file assistant-browser-evidence.json \
+            --manifest evidence/assistant-eval.manifest.json \
+            --key-id "$ARTIFACT_KEY_ID" --code-commit "$code_commit" \
+            --source "artifact_manifest_set=$target_manifest_set" \
+            --source "browser_evidence_sha256=$browser_evidence_sha" \
+            --source "candidate_evidence_sha256=$target_evidence" \
+            --source "candidate_revision=$CANDIDATE_REVISION" \
+            --source "cases_sha256=$cases_sha" \
+            --source "purpose=assistant-evaluation" \
+            --source "report_schema=$report_schema"
+          digest=$(openssl dgst -sha256 -binary evidence/assistant-eval.manifest.json \
+            | openssl base64 -A)
+          az keyvault key sign --vault-name "$AZURE_KEY_VAULT" \
+            --name "$AZURE_KEY_NAME" --version "$AZURE_KEY_VERSION" \
+            --algorithm ES256 --digest "$digest" -o json \
+            | jq -er '.signature' > evidence/assistant-eval.manifest.sig
+
+          dotnet run --project lex/src/Lex.Ingest/Lex.Ingest.csproj -c Release -- \
+            assistant-eval verify-release \
+            --root evidence \
+            --manifest evidence/assistant-eval.manifest.json \
+            --signature evidence/assistant-eval.manifest.sig \
+            --trust-roots lex/deploy/trusted-artifact-roots.json \
+            --base-url "https://$candidate_fqdn" \
+            --candidate-container-app-resource-id "$app_id" \
+            --candidate-revision "$CANDIDATE_REVISION"
+
+          gh release upload "$EVALUATION_RELEASE" \
+            evidence/assistant-browser-evidence.json \
+            evidence/assistant-eval.manifest.json \
+            evidence/assistant-eval.manifest.sig
+          gh release edit "$EVALUATION_RELEASE" --draft=false --latest=false \
+            --title "Lex assistant evaluation ${code_commit:0:12}" \
+            --notes "Signed production release evidence for candidate revision $CANDIDATE_REVISION. Promotion independently revalidates this package against Azure and the live candidate attestation."
+
+      - name: Always restore one active quota authority
+        if: always() && steps.publish.outputs.candidate_owned == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            az containerapp revision deactivate -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+              --revision "$CANDIDATE_REVISION" >/dev/null 2>&1 || true
+            active=$(az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+              --revision "$CANDIDATE_REVISION" --query properties.active -o tsv 2>/dev/null || true)
+            [ "$active" = "false" ] && break
+            [ "$attempt" = "5" ] \
+              && { echo "::error::candidate remains an active quota authority"; exit 1; }
+            sleep "$attempt"
+          done
+          active_count=$(az containerapp revision list -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+            --query "[?properties.active==\`true\`] | length(@)" -o tsv)
+          [ "$active_count" = "1" ] \
+            || { echo "::error::expected exactly one active revision, found $active_count"; exit 1; }
+
+      - name: Publication summary
+        shell: bash
+        run: |
+          {
+            echo "## Signed Lex assistant evaluation"
+            echo
+            echo "- release: \`$EVALUATION_RELEASE\`"
+            echo "- candidate revision: \`$CANDIDATE_REVISION\`"
+            echo "- code commit: \`$code_commit\`"
+            echo "- independent review signature: verified"
+            echo "- Azure target and model identities: verified"
+            echo "- whole-evidence Key Vault signature: verified"
+          } >> "$GITHUB_STEP_SUMMARY"
