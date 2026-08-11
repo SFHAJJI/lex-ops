@@ -518,21 +518,11 @@ if [ "$derive_outcome" = "ran_committed" ]; then
   dataset_ok=1
   dotnet run --project lex/src/Lex.Ingest -c Release -- dataset --articles articles --out dataset || dataset_ok=0
   if [ "$dataset_ok" = 1 ]; then
-    python3 -m pip install --quiet pyarrow \
-      || python3 -m pip install --quiet --break-system-packages pyarrow || dataset_ok=0
+    python3 -m pip install --quiet pyarrow==25.0.0 \
+      || python3 -m pip install --quiet --break-system-packages pyarrow==25.0.0 || dataset_ok=0
   fi
   if [ "$dataset_ok" = 1 ]; then
-    python3 - <<'PYEOF' || dataset_ok=0
-import glob, gzip, shutil
-import pyarrow.json as pj, pyarrow.parquet as pq
-for gzpath in glob.glob("dataset/*-provisions.jsonl.gz"):
-    jl = gzpath[:-3]
-    with gzip.open(gzpath, "rb") as fin, open(jl, "wb") as fout:
-        shutil.copyfileobj(fin, fout)
-    out = jl.replace(".jsonl", ".parquet")
-    pq.write_table(pj.read_json(jl), out, compression="zstd")
-    print("parquet:", out)
-PYEOF
+    python3 dataset_to_parquet.py dataset/*-provisions.jsonl.gz || dataset_ok=0
   fi
   if [ "$dataset_ok" = 1 ]; then
     tag="dataset-$(date -u +%F)"

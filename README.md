@@ -54,6 +54,12 @@ when that deterministic input identity changes. This allows a failed run to resu
 publication and allows an intentional versioned extraction profile to regenerate results, while
 identical inputs producing a diff still fail as nondeterminism.
 
+Dataset releases contain the same provision-version rows as compressed JSONL and Parquet. Some
+official EUR-Lex annex tables are tens of megabytes in one legal provision, so conversion uses a
+pinned PyArrow version and an explicit 64 MiB JSON-row ceiling rather than PyArrow's small default
+read block. Fleet rejects a row above that documented ceiling instead of growing memory without a
+bound or silently omitting legal text.
+
 The public nightly never receives a signing key, logs into Azure, downloads the embedding model or
 attempts the long index build. It records `status/index-queue.json` from exact public Git commits.
 The deterministic index is built locally from those commits and uploaded to private staging. The
