@@ -52,7 +52,7 @@ class DatasetToParquetTests(unittest.TestCase):
             self.assertEqual(1, validate_rows(lf, maximum_row_bytes=64))
             self.assertEqual(1, validate_rows(crlf, maximum_row_bytes=64))
 
-    def test_date_like_values_remain_strings_across_streaming_batches(self) -> None:
+    def test_date_like_values_remain_strings(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             source = Path(root) / "lu-legilux-provisions.jsonl.gz"
             with gzip.open(source, "wt", encoding="utf-8") as stream:
