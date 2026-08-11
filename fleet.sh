@@ -510,11 +510,41 @@ if [ -f .index-queue ]; then
   fi
 fi
 
-# ---- dataset release assets (lex-articles): JSONL.gz + parquet, only when derive committed.
+# ---- dataset release assets (lex-articles): JSONL.gz + parquet, once per derived commit.
 # All row fields are flat strings, so parquet schema inference is deterministic.
 echo "=== dataset (lex-articles release assets) ==="
 dataset_outcome="skipped_no_change"
-if [ "$derive_outcome" = "ran_committed" ]; then
+dataset_required=0
+dataset_tag=""
+if [ "$derive_outcome" = "ran_committed" ] || [ "$derive_outcome" = "ran_no_change" ]; then
+  articles_commit=$(git -C articles rev-parse HEAD)
+  dataset_tag="dataset-$articles_commit"
+  dataset_current=0
+  if asset_names=$(gh release view "$dataset_tag" --repo SFHAJJI/lex-articles \
+       --json assets -q '.assets[].name' 2>/dev/null); then
+    tag_commit=$(git ls-remote https://github.com/SFHAJJI/lex-articles.git \
+      "refs/tags/$dataset_tag" | awk 'NR == 1 { print $1 }')
+    if [ "$tag_commit" != "$articles_commit" ]; then
+      echo "ERROR: immutable dataset tag $dataset_tag does not point at $articles_commit" >&2
+      overall_rc=1
+    else
+      dataset_current=1
+      for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
+        for asset in "$pub-provisions.jsonl.gz" "$pub-provisions.parquet"; do
+          if ! grep -Fxq "$asset" <<<"$asset_names"; then
+            dataset_current=0
+          fi
+        done
+      done
+    fi
+  fi
+  if [ "$dataset_current" = 1 ]; then
+    echo "--- lex-dataset: current at articles $articles_commit"
+  elif [ "$overall_rc" = 0 ]; then
+    dataset_required=1
+  fi
+fi
+if [ "$dataset_required" = 1 ]; then
   dataset_ok=1
   dotnet run --project lex/src/Lex.Ingest -c Release -- dataset --articles articles --out dataset || dataset_ok=0
   if [ "$dataset_ok" = 1 ]; then
@@ -531,11 +561,11 @@ if [ "$derive_outcome" = "ran_committed" ]; then
     fi
   fi
   if [ "$dataset_ok" = 1 ]; then
-    tag="dataset-$(date -u +%F)"
-    if gh release create "$tag" dataset/*-provisions.jsonl.gz dataset/*-provisions.parquet \
+    if gh release create "$dataset_tag" dataset/*-provisions.jsonl.gz dataset/*-provisions.parquet \
          --repo SFHAJJI/lex-articles --title "dataset $(date -u +%F)" \
-         --notes "One row per provision-version (licence + attribution inline). JSONL.gz and parquet, same rows. Regenerated nightly when the law changes." \
-       || gh release upload "$tag" dataset/*-provisions.jsonl.gz dataset/*-provisions.parquet \
+         --target "$articles_commit" \
+         --notes "One row per provision-version (licence + attribution inline). JSONL.gz and parquet contain the same rows from lex-articles commit $articles_commit." \
+       || gh release upload "$dataset_tag" dataset/*-provisions.jsonl.gz dataset/*-provisions.parquet \
             --repo SFHAJJI/lex-articles --clobber; then
       dataset_outcome="ran_published"
     else
