@@ -68,7 +68,9 @@ validate_working_status() {
     [[ "$relative" =~ ^status/[a-z0-9][a-z0-9.-]{0,127}\.(json|jsonl)$ ]] \
       || fail "$relative is outside the bounded status layout"
     size=$(wc -c < "$path")
-    [ "$size" -le "$maximum_file_bytes" ] || fail "$relative exceeds the status file limit"
+    size=${size//[[:space:]]/}
+    [[ "$size" =~ ^[0-9]+$ ]] && [ "$size" -le "$maximum_file_bytes" ] \
+      || fail "$relative exceeds the status file limit"
     count=$((count + 1))
     total=$((total + size))
     [ "$count" -le "$maximum_files" ] && [ "$total" -le "$maximum_total_bytes" ] \
