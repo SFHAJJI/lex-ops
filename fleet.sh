@@ -522,8 +522,11 @@ if [ "$derive_outcome" = "ran_committed" ] || [ "$derive_outcome" = "ran_no_chan
   dataset_current=0
   if asset_names=$(gh release view "$dataset_tag" --repo SFHAJJI/lex-articles \
        --json assets -q '.assets[].name' 2>/dev/null); then
+    # Prefer the peeled commit for an annotated tag; lightweight tags expose only the direct ref.
     tag_commit=$(git ls-remote https://github.com/SFHAJJI/lex-articles.git \
-      "refs/tags/$dataset_tag" | awk 'NR == 1 { print $1 }')
+      "refs/tags/$dataset_tag" "refs/tags/$dataset_tag^{}" \
+      | awk '$2 ~ /\^\{\}$/ { peeled=$1 } $2 !~ /\^\{\}$/ { direct=$1 }
+             END { if (length(peeled) > 0) print peeled; else print direct }')
     if [ "$tag_commit" != "$articles_commit" ]; then
       echo "ERROR: immutable dataset tag $dataset_tag does not point at $articles_commit" >&2
       overall_rc=1
