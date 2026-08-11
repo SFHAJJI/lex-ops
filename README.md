@@ -10,9 +10,11 @@ night on `fleet-status`, never a heartbeat in a code or corpus branch.
 Workflow concurrency is serialized without preemption. If a manual recovery run overlaps the
 02:17 schedule, the scheduled run waits rather than racing the active publisher, article, release,
 or status writers. The active run is never canceled merely because a newer trigger arrived.
-The workflow hydrates `status/` from the fast-forward-only `fleet-status` branch before each run,
-then publishes a status-only commit there with a bounded retry. `main` remains PR-protected and
-contains executable operations code only; a long Fleet run never needs to bypass that protection.
+The workflow validates and hydrates `status/` from the fast-forward-only `fleet-status` branch
+before each run, then publishes a status-only commit there with a bounded retry. A transport error
+or concurrent status writer fails closed instead of falling back to stale state. The status tree
+accepts only bounded regular JSON/JSONL files directly under `status/`. `main` remains PR-protected
+and contains executable operations code only; a long Fleet run never bypasses that protection.
 
 If an index build is interrupted after corpus and article commits land, dispatch the workflow with
 `force_index_publisher` set to that enabled publisher id (for example, `eu-eurlex`). Fleet still
@@ -64,10 +66,12 @@ bound or silently omitting legal text. Each release tag is addressed by the exac
 commit. A failed export is therefore retried even after the derived commit has already landed,
 while a complete release for the current commit makes later no-change nights a cheap skip.
 
-The generated status branch is coordination state, not a release trust root. Publication also
-requires every ticketed Lex, corpus and derived-article commit to belong to its protected `main`
-history, re-verifies the staged hashes and embedded stamp, and requires the production environment
-before Key Vault signing.
+The generated status branch is coordination state, not a release trust root. Server-side branch
+rules reject force-pushes and deletion for `fleet-status` and each automated source `main` while
+still allowing linear append-only Fleet pushes. Publication also requires every ticketed Lex,
+corpus and derived-article commit to belong to that repository's append-only `main` history,
+re-verifies the staged hashes and embedded stamp, and requires the production environment before
+Key Vault signing.
 
 The public nightly never receives a signing key, logs into Azure, downloads the embedding model or
 attempts the long index build. It records `status/index-queue.json` from exact public Git commits.
