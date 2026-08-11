@@ -180,7 +180,7 @@ jobs:
           for attempt in {1..20}; do
             running=$(az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
               --revision "$CANDIDATE_REVISION" --query properties.runningState -o tsv)
-            [ "$running" = "Running" ] && break
+              { [ "$running" = "Running" ] || [ "$running" = "RunningAtMaxScale" ]; } && break
             [ "$attempt" = "20" ] \
               && { echo "::error::candidate revision did not become ready"; exit 1; }
             sleep 3
