@@ -75,31 +75,23 @@ jobs:
             --pattern 'assistant-cases-v3.review.json' \
             --pattern 'assistant-cases-v3.review.sig'
           test "$(find evidence -maxdepth 1 -type f | wc -l)" -eq 4
-          code_commit=$(jq -er '.identity.target.code_commit
-            | select(test("^[0-9a-f]{40}$"))' evidence/assistant-eval-report.json)
-          report_revision=$(jq -er '.identity.target.revision_name'
-            evidence/assistant-eval-report.json)
-          [ "$report_revision" = "$CANDIDATE_REVISION" ] \
-            || { echo "::error::report revision does not match dispatch"; exit 2; }
-          report_sha=$(sha256sum evidence/assistant-eval-report.json | cut -d' ' -f1)
-          expected_tag="assistant-eval-${code_commit:0:12}-${report_sha:0:12}"
-          [ "$EVALUATION_RELEASE" = "$expected_tag" ] \
-            || { echo "::error::release tag does not bind report bytes and code"; exit 2; }
-          echo "code_commit=$code_commit" >> "$GITHUB_ENV"
+          python3 scripts/assistant_evaluation_identity.py \
+            evidence/assistant-eval-report.json \
+            "$CANDIDATE_REVISION" "$EVALUATION_RELEASE" "$GITHUB_ENV"
 
       - name: Check out the exact evaluated Lex commit
         shell: bash
         run: |
           set -euo pipefail
           git clone --filter=blob:none https://github.com/SFHAJJI/lex.git lex
-          git -C lex checkout --detach "$code_commit"
-          test "$(git -C lex rev-parse HEAD)" = "$code_commit"
+          git -C lex checkout --detach "$CODE_COMMIT"
+          test "$(git -C lex rev-parse HEAD)" = "$CODE_COMMIT"
 
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           dotnet-version: 10.0.x
 
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dba9c38 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
           cache: npm
@@ -122,7 +114,7 @@ jobs:
           done
           [[ "$AZURE_KEY_VERSION" =~ ^[0-9a-f]{32}$ ]] \
             || { echo "::error::artifact key version is invalid"; exit 1; }
-          git -C lex merge-base --is-ancestor "$code_commit" refs/remotes/origin/main \
+          git -C lex merge-base --is-ancestor "$CODE_COMMIT" refs/remotes/origin/main \
             || { echo "::error::evaluated code is not on Lex main"; exit 2; }
 
       - name: Azure login for authenticated evidence and non-exportable signing
@@ -196,18 +188,12 @@ jobs:
             --candidate-container-app-resource-id "$app_id" \
             --candidate-revision "$CANDIDATE_REVISION"
 
-          target_manifest_set=$(jq -er '.identity.target.artifact_manifest_set'
-            evidence/assistant-eval-report.json)
-          target_evidence=$(jq -er '.identity.target.evidence_sha256'
-            evidence/assistant-eval-report.json)
-          cases_sha=$(jq -er '.cases_sha256' evidence/assistant-eval-report.json)
-          report_schema=$(jq -er '.schema' evidence/assistant-eval-report.json)
           export LEX_BROWSER_BASE_URL="https://$candidate_fqdn"
           export LEX_BROWSER_EVIDENCE_OUT="$GITHUB_WORKSPACE/evidence/assistant-browser-evidence.json"
           export LEX_CANDIDATE_REVISION="$CANDIDATE_REVISION"
-          export LEX_CODE_COMMIT="$code_commit"
-          export LEX_ARTIFACT_MANIFEST_SET="$target_manifest_set"
-          export LEX_CANDIDATE_EVIDENCE_SHA256="$target_evidence"
+          export LEX_CODE_COMMIT="$CODE_COMMIT"
+          export LEX_ARTIFACT_MANIFEST_SET="$TARGET_MANIFEST_SET"
+          export LEX_CANDIDATE_EVIDENCE_SHA256="$TARGET_EVIDENCE_SHA"
           npm --prefix lex/web run test:browser-release
           test -s evidence/assistant-browser-evidence.json
           browser_evidence_sha=$(sha256sum evidence/assistant-browser-evidence.json | cut -d' ' -f1)
@@ -219,14 +205,14 @@ jobs:
             --file assistant-cases-v3.review.sig \
             --file assistant-browser-evidence.json \
             --manifest evidence/assistant-eval.manifest.json \
-            --key-id "$ARTIFACT_KEY_ID" --code-commit "$code_commit" \
-            --source "artifact_manifest_set=$target_manifest_set" \
+            --key-id "$ARTIFACT_KEY_ID" --code-commit "$CODE_COMMIT" \
+            --source "artifact_manifest_set=$TARGET_MANIFEST_SET" \
             --source "browser_evidence_sha256=$browser_evidence_sha" \
-            --source "candidate_evidence_sha256=$target_evidence" \
+            --source "candidate_evidence_sha256=$TARGET_EVIDENCE_SHA" \
             --source "candidate_revision=$CANDIDATE_REVISION" \
-            --source "cases_sha256=$cases_sha" \
+            --source "cases_sha256=$CASES_SHA" \
             --source "purpose=assistant-evaluation" \
-            --source "report_schema=$report_schema"
+            --source "report_schema=$REPORT_SCHEMA"
           digest=$(openssl dgst -sha256 -binary evidence/assistant-eval.manifest.json \
             | openssl base64 -A)
           az keyvault key sign --vault-name "$AZURE_KEY_VAULT" \
@@ -251,7 +237,7 @@ jobs:
             evidence/assistant-eval.manifest.sig \
             --clobber
           gh release edit "$EVALUATION_RELEASE" --draft=false --latest=false \
-            --title "Lex assistant evaluation ${code_commit:0:12}" \
+            --title "Lex assistant evaluation ${CODE_COMMIT:0:12}" \
             --notes "Signed production release evidence for candidate revision $CANDIDATE_REVISION. Promotion independently revalidates this package against Azure and the live candidate attestation."
 
       - name: Always restore one active quota authority
@@ -282,7 +268,7 @@ jobs:
             echo
             echo "- release: \`$EVALUATION_RELEASE\`"
             echo "- candidate revision: \`$CANDIDATE_REVISION\`"
-            echo "- code commit: \`$code_commit\`"
+            echo "- code commit: \`$CODE_COMMIT\`"
             echo "- independent review signature: verified"
             echo "- Azure target and model identities: verified"
             echo "- whole-evidence Key Vault signature: verified"
