@@ -9,7 +9,12 @@ import pyarrow.parquet as parquet
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from dataset_to_parquet import MAXIMUM_JSON_ROW_BYTES, convert, validate_rows
+from dataset_to_parquet import (
+    MAXIMUM_JSON_ROW_BYTES,
+    PYARROW_BLOCK_BYTES,
+    convert,
+    validate_rows,
+)
 
 
 class DatasetToParquetTests(unittest.TestCase):
@@ -60,6 +65,7 @@ class DatasetToParquetTests(unittest.TestCase):
 
     def test_ceiling_covers_the_observed_eur_lex_annex(self) -> None:
         self.assertGreater(MAXIMUM_JSON_ROW_BYTES, 47_478_995)
+        self.assertEqual(MAXIMUM_JSON_ROW_BYTES + 2, PYARROW_BLOCK_BYTES)
 
 
 if __name__ == "__main__":

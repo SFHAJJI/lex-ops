@@ -16,6 +16,7 @@ import pyarrow.parquet as parquet
 # 47,478,995 bytes, so the default PyArrow block (~1 MiB) cannot frame it. Keep the
 # supported ceiling explicit: it bounds validation and PyArrow's conversion buffer.
 MAXIMUM_JSON_ROW_BYTES = 64 * 1024 * 1024
+PYARROW_BLOCK_BYTES = MAXIMUM_JSON_ROW_BYTES + 2
 
 DATASET_COLUMNS = (
     "provision_id",
@@ -68,7 +69,8 @@ def convert(path: Path) -> Path:
     temporary = output.with_suffix(output.suffix + ".tmp")
     batches = pyarrow_json.open_json(
         path,
-        read_options=pyarrow_json.ReadOptions(block_size=MAXIMUM_JSON_ROW_BYTES),
+        # The parser also has to frame the largest allowed object plus its CRLF delimiter.
+        read_options=pyarrow_json.ReadOptions(block_size=PYARROW_BLOCK_BYTES),
         parse_options=pyarrow_json.ParseOptions(
             explicit_schema=DATASET_SCHEMA,
             unexpected_field_behavior="error",
