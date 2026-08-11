@@ -199,7 +199,6 @@ fi
 if [ "${DEPLOY_AFTER_PUBLISH:-0}" = "1" ]; then
   gh api repos/SFHAJJI/lex/dispatches -X POST \
     -f event_type=verified_artifact_release \
-    -F 'client_payload[require_manifest]=true' \
     -F 'client_payload[promote]=false'
 fi
 
