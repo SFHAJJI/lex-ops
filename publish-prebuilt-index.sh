@@ -34,10 +34,9 @@ set -euo pipefail
 repo=$(jq -er --arg pub "$PUBLISHER" \
   '.publishers[] | select(.enabled and .id == $pub) | .corpus_repo' publishers.json)
 
-git cat-file -e "$QUEUE_COMMIT^{commit}" 2>/dev/null \
-  || { echo "ERROR: queue commit is not present" >&2; exit 2; }
-git merge-base --is-ancestor "$QUEUE_COMMIT" refs/remotes/origin/main \
-  || { echo "ERROR: queue commit is not on the current main history" >&2; exit 2; }
+git fetch --no-tags origin \
+  +refs/heads/fleet-status:refs/remotes/origin/fleet-status
+bash require-ancestor.sh . "$QUEUE_COMMIT" refs/remotes/origin/fleet-status "queue commit"
 ticket=$(git show "$QUEUE_COMMIT:status/index-queue.json")
 printf '%s' "$ticket" | jq -e --arg pub "$PUBLISHER" --arg repo "$repo" \
   --arg corpus "$CORPUS_COMMIT" --arg code "$BUILD_CODE_COMMIT" \
@@ -55,6 +54,8 @@ printf '%s' "$ticket" | jq -e --arg pub "$PUBLISHER" --arg repo "$repo" \
 publication_tool_commit=$(git -C lex rev-parse HEAD)
 [ "$publication_tool_commit" = "$BUILD_CODE_COMMIT" ] \
   || { echo "ERROR: publication tooling does not match the ticketed Lex commit" >&2; exit 2; }
+git -C lex fetch --no-tags origin main
+bash require-ancestor.sh lex "$BUILD_CODE_COMMIT" refs/remotes/origin/main "ticketed Lex commit"
 
 index="index-$PUBLISHER.db"
 vectors="index-$PUBLISHER.vectors"
@@ -75,10 +76,13 @@ echo "=== resolve exact corpus and pinned embedding runtime ==="
 git clone --filter=blob:none "https://x-access-token:${GH_TOKEN}@github.com/${repo}.git" corpus
 git -C corpus checkout --detach "$CORPUS_COMMIT"
 test "$(git -C corpus rev-parse HEAD)" = "$CORPUS_COMMIT"
+bash require-ancestor.sh corpus "$CORPUS_COMMIT" refs/remotes/origin/main "ticketed corpus commit"
 git clone --filter=blob:none \
   "https://x-access-token:${GH_TOKEN}@github.com/SFHAJJI/lex-articles.git" articles-ticket
 git -C articles-ticket checkout --detach "$ARTICLES_COMMIT"
 test "$(git -C articles-ticket rev-parse HEAD)" = "$ARTICLES_COMMIT"
+bash require-ancestor.sh articles-ticket "$ARTICLES_COMMIT" refs/remotes/origin/main \
+  "ticketed articles commit"
 
 cp lex/deploy/embedding-model/model-manifest.json model-manifest.json
 model_revision=$(jq -r .revision model-manifest.json)
