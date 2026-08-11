@@ -48,6 +48,7 @@ class FleetStatusTests(unittest.TestCase):
             run("git", "config", "user.email", "test@example.invalid", cwd=first)
             (first / "status").mkdir()
             (first / "status" / "publisher.json").write_text("main-old\n", encoding="utf-8")
+            (first / "status" / "obsolete.json").write_text("obsolete\n", encoding="utf-8")
             (first / "README.md").write_text("main\n", encoding="utf-8")
             run("git", "add", ".", cwd=first)
             run("git", "commit", "-m", "initial", cwd=first)
@@ -55,6 +56,7 @@ class FleetStatusTests(unittest.TestCase):
             run("git", "push", "-u", "origin", "main", cwd=first)
 
             (first / "status" / "publisher.json").write_text("night-one\n", encoding="utf-8")
+            (first / "status" / "obsolete.json").unlink()
             run(BASH, str(SCRIPT), "publish", cwd=first)
             first_status = run("git", "rev-parse", "refs/remotes/origin/fleet-status", cwd=first)
             self.assertEqual(
@@ -68,6 +70,7 @@ class FleetStatusTests(unittest.TestCase):
             run("git", "config", "user.email", "test@example.invalid", cwd=second)
             run(BASH, str(SCRIPT), "hydrate", cwd=second)
             self.assertEqual("night-one\n", (second / "status" / "publisher.json").read_text(encoding="utf-8"))
+            self.assertFalse((second / "status" / "obsolete.json").exists())
 
             (second / "status" / "publisher.json").write_text("night-two\n", encoding="utf-8")
             run(BASH, str(SCRIPT), "publish", cwd=second)
@@ -82,6 +85,7 @@ class FleetStatusTests(unittest.TestCase):
 
         self.assertIn("refs/remotes/origin/fleet-status", workflow)
         self.assertIn("refs/remotes/origin/fleet-status", publisher)
+        self.assertIn("git fetch --no-tags origin", publisher)
         self.assertIn('git -C lex merge-base --is-ancestor "$BUILD_CODE_COMMIT"', publisher)
         self.assertIn('git -C corpus merge-base --is-ancestor "$CORPUS_COMMIT"', publisher)
         self.assertIn('git -C articles-ticket merge-base --is-ancestor "$ARTICLES_COMMIT"', publisher)

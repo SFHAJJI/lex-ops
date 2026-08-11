@@ -34,6 +34,8 @@ set -euo pipefail
 repo=$(jq -er --arg pub "$PUBLISHER" \
   '.publishers[] | select(.enabled and .id == $pub) | .corpus_repo' publishers.json)
 
+git fetch --no-tags origin \
+  +refs/heads/fleet-status:refs/remotes/origin/fleet-status
 git cat-file -e "$QUEUE_COMMIT^{commit}" 2>/dev/null \
   || { echo "ERROR: queue commit is not present" >&2; exit 2; }
 git merge-base --is-ancestor "$QUEUE_COMMIT" refs/remotes/origin/fleet-status \
