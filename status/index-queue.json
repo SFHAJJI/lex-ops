@@ -1,14 +1,14 @@
 {
   "schema": "lex-index-build-queue/1",
-  "generated_at": "2026-08-10T16:03:42Z",
+  "generated_at": "2026-08-11T10:50:26Z",
   "mode": "prebuilt",
-  "build_code_commit": "239607e7379ab809fb0f3ec7e483a7e5aabe76e7",
-  "articles_commit": "899f087b64c5b294f596f12bf0cc76a80043fdb2",
+  "build_code_commit": "6c12b30275f646cee4a9935af02502b1f7508ddb",
+  "articles_commit": "726276278b8e1275ac7a7551c7786adb43660bf0",
   "entries": [
     {
-      "collection": "lu-legilux",
-      "corpus_repo": "SFHAJJI/lex-corpus-lu-legilux",
-      "corpus_commit": "ba6af3d65422e9181f887750c2e7da52a7a91ae2"
+      "collection": "eu-eurlex",
+      "corpus_repo": "SFHAJJI/lex-corpus-eu-eurlex",
+      "corpus_commit": "9891b5172604de27a7d74f11c9604d5de3aaa367"
     }
   ]
 }
