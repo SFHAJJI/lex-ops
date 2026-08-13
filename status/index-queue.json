@@ -1,8 +1,14 @@
 {
   "schema": "lex-index-build-queue/1",
-  "generated_at": "2026-08-13T03:11:19Z",
+  "generated_at": "2026-08-13T07:18:41Z",
   "mode": "prebuilt",
-  "build_code_commit": "1e0a151c60ca6bd0f3afcdb0949ed97d3d30e6aa",
-  "articles_commit": "512b9a3a4bdba2fab247e3d6277021ce32861ba5",
-  "entries": []
+  "build_code_commit": "258d18a6032c5c9936ff610930a599d6d05ef800",
+  "articles_commit": "a65682d8135741e8619cbd10291664a0b2dffb35",
+  "entries": [
+    {
+      "collection": "eu-eurlex",
+      "corpus_repo": "SFHAJJI/lex-corpus-eu-eurlex",
+      "corpus_commit": "a065790ecef050bdfc6d9b5bfd2491a62467740c"
+    }
+  ]
 }
