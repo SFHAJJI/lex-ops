@@ -40,8 +40,17 @@ jobs:
           git ls-remote https://github.com/SFHAJJI/lex.git refs/heads/main \
             | cut -f1 | grep -Fx "$LEX_COMMIT"
 
-  corpus:
+  authorize:
     needs: gate
+    environment: corpus-v4-migration
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Record independent migration approval
+        run: echo "Reviewed corpus-v4 migration authorized for ${{ inputs.lex_commit }}"
+
+  corpus:
+    needs: authorize
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -60,6 +69,22 @@ jobs:
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           dotnet-version: 10.0.x
+      - name: Verify reviewed code and append-only corpus histories
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.LEX_OPS_TOKEN }}
+          PUBLISHER: ${{ matrix.publisher }}
+        run: |
+          set -euo pipefail
+          repo=$(jq -er --arg publisher "$PUBLISHER" \
+            '.publishers[] | select(.enabled and .id == $publisher) | .corpus_repo' \
+            publishers.json)
+          code_policy=$(mktemp)
+          source_policy=$(mktemp)
+          gh api repos/SFHAJJI/lex/branches/main/protection > "$code_policy"
+          gh api "repos/$repo/branches/main/protection" > "$source_policy"
+          bash scripts/v4-release-contract.sh validate-protected-code "$code_policy"
+          bash scripts/v4-release-contract.sh validate-append-only-protection "$source_policy"
       - name: Build and publish one complete corpus replacement
         shell: bash
         env:
@@ -85,6 +110,21 @@ jobs:
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           dotnet-version: 10.0.x
+      - name: Verify reviewed code and append-only derived histories
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.LEX_OPS_TOKEN }}
+        run: |
+          set -euo pipefail
+          code_policy=$(mktemp)
+          articles_policy=$(mktemp)
+          status_policy=$(mktemp)
+          gh api repos/SFHAJJI/lex/branches/main/protection > "$code_policy"
+          gh api repos/SFHAJJI/lex-articles/branches/main/protection > "$articles_policy"
+          gh api repos/SFHAJJI/lex-ops/branches/fleet-status/protection > "$status_policy"
+          bash scripts/v4-release-contract.sh validate-protected-code "$code_policy"
+          bash scripts/v4-release-contract.sh validate-append-only-protection "$articles_policy"
+          bash scripts/v4-release-contract.sh validate-append-only-protection "$status_policy"
       - name: Derive once and publish the immutable DirectML build ticket
         shell: bash
         env:

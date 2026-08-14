@@ -10,11 +10,12 @@ FORCE_INDEX_PUBLISHER="${FORCE_INDEX_PUBLISHER:-}"
 INDEX_BUILD_MODE="${INDEX_BUILD_MODE:-prebuilt}"
 lex_code_commit=$(git -C lex rev-parse HEAD)
 deriver_tree_id=$(git -C lex rev-parse HEAD:src/Lex.Derive)
+release_contract=scripts/v4-release-contract.sh
 
-configuration_for() {
+source_configuration_for() {
   case "$1" in
-    lu-legilux) printf '%s\n' lex/config/lu-work-enrichment.json ;;
-    eu-eurlex) printf '%s\n' lex/config/eu-work-enrichment.json ;;
+    lu-legilux) printf '%s\n' - ;;
+    eu-eurlex) printf '%s\n' lex/src/Lex.Sources.EurLex/eu-scope.json ;;
     *) echo "ERROR: unsupported publisher $1" >&2; return 2 ;;
   esac
 }
@@ -137,8 +138,9 @@ for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
 done
 
 # ---- derived consumption layer (lex-articles): regenerate, guard, push (§ blueprint inc 4).
-# Determinism guard: canonical generation/2 records each exact corpus head and manifest digest,
-# the materializing ingester, deriver commit/tree, reviewed configuration, and profile set.
+# Determinism guard: canonical generation/3 records each exact corpus head and manifest digest,
+# the materializing ingester, deriver commit/tree and profile set. Source scope is bound once in
+# the corpus manifest instead of being re-labelled by a downstream enrichment file.
 # Derived files may change only when that complete input identity changes. This permits a retry
 # after corpus publication or an intentional new extraction profile, while an output diff from
 # identical inputs remains a hard nondeterminism failure.
@@ -154,17 +156,16 @@ if git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/SFHAJJI/le
     esac
     [ -d "corpus-$pub" ] || continue
     corpus_commit=$(git -C "corpus-$pub" rev-parse HEAD)
-    configuration=$(configuration_for "$pub")
     dotnet run --project lex/src/Lex.Ingest -c Release -- derive \
       --publisher "$pub" --corpus "corpus-$pub" --out articles \
       --code-commit "$lex_code_commit" --deriver-tree-id "$deriver_tree_id" \
-      --corpus-commit "$corpus_commit" --reviewed-configuration "$configuration" \
+      --corpus-commit "$corpus_commit" \
       || derive_ok=0
   done
   [ "$derive_ok" = 1 ] && { dotnet run --project lex/src/Lex.Ingest -c Release -- catalog --articles articles || derive_ok=0; }
   if [ "$derive_ok" = 1 ]; then
-    jq -e '.schema == "lex-articles-generation/2"' articles/generation.json >/dev/null \
-      || { echo "DERIVE: missing canonical generation/2 provenance"; derive_ok=0; }
+    jq -e '.schema == "lex-articles-generation/3"' articles/generation.json >/dev/null \
+      || { echo "DERIVE: missing canonical generation/3 provenance"; derive_ok=0; }
 
     changed=$(git -C articles status --porcelain | wc -l)
     input_changed=0
@@ -292,18 +293,80 @@ fi
 queue='[]'
 articles_commit=$(git -C articles rev-parse HEAD 2>/dev/null || true)
 if [ -f .index-queue ]; then
+  queue_ok=1
+  queue_file=$(mktemp)
+  sort -u .index-queue > "$queue_file"
   while read -r pub repo; do
     [ -n "$pub" ] || continue
     corpus_commit=$(git -C "corpus-$pub" rev-parse HEAD)
-    queue=$(jq --arg pub "$pub" --arg repo "$repo" --arg corpus "$corpus_commit" \
-      '. + [{collection:$pub,corpus_repo:$repo,corpus_commit:$corpus}]' <<<"$queue")
-  done < .index-queue
+    source_configuration=$(source_configuration_for "$pub")
+    if ! bash "$release_contract" validate-generation "$pub" "$repo" "$corpus_commit" \
+      "$lex_code_commit" "$deriver_tree_id" "corpus-$pub/manifest.json" \
+      articles/generation.json "$source_configuration"; then
+      queue_ok=0; overall_rc=1; break
+    fi
+    entry=$(jq -c -n --arg publisher "$pub" --arg repo "$repo" \
+      --arg corpus "$corpus_commit" --slurpfile generation articles/generation.json \
+      --slurpfile manifest "corpus-$pub/manifest.json" '
+        $generation[0].publishers[$publisher] as $g | $manifest[0] as $m |
+        {collection:$publisher,corpus_repo:$repo,corpus_commit:$corpus,
+         corpus_manifest_sha256:$g.corpus_manifest_sha256,
+         ingester_code_commit:$g.ingester_code_commit,
+         deriver_code_commit:$g.deriver_code_commit,deriver_tree_id:$g.deriver_tree_id,
+         profiles_sha256:$g.profiles_sha256,
+         source_configuration_kind:$m.source_configuration_kind,
+         source_configuration_sha256:($m.source_configuration_sha256 // null)}')
+    queue=$(jq --argjson entry "$entry" '. + [$entry]' <<<"$queue")
+  done < "$queue_file"
+
+  if [ "$queue_ok" = 1 ]; then
+    queue_core=$(mktemp)
+    candidate_ticket=$(mktemp)
+    generation_sha=$(sha256sum articles/generation.json | awk '{print $1}')
+    jq -n --arg mode "$INDEX_BUILD_MODE" --arg code "$lex_code_commit" \
+      --arg articles "$articles_commit" --arg generation "$generation_sha" \
+      --argjson entries "$queue" \
+      '{schema:"lex-index-build-queue/2",mode:$mode,build_code_commit:$code,
+        articles_commit:$articles,articles_generation_sha256:$generation,entries:$entries}' \
+      > "$queue_core"
+    if ! bash "$release_contract" seal-ticket "$queue_core" "$candidate_ticket" "$STAMP"; then
+      queue_ok=0; overall_rc=1
+    fi
+  fi
+  if [ "$queue_ok" = 1 ]; then
+    while read -r pub repo; do
+      [ -n "$pub" ] || continue
+      corpus_commit=$(git -C "corpus-$pub" rev-parse HEAD)
+      source_configuration=$(source_configuration_for "$pub")
+      if ! bash "$release_contract" validate-source "$candidate_ticket" "$pub" "$repo" \
+        "$corpus_commit" "$lex_code_commit" "$articles_commit" \
+        "corpus-$pub/manifest.json" articles/generation.json "$source_configuration"; then
+        queue_ok=0; overall_rc=1; break
+      fi
+    done < "$queue_file"
+  fi
+  if [ "$queue_ok" = 1 ]; then
+    if ticket_action=$(bash "$release_contract" classify-ticket \
+      status/index-queue.json "$candidate_ticket"); then
+      if [ "$ticket_action" = "reuse" ]; then
+        echo "--- index queue: reusing exact ticket $(jq -r .ticket_id "$candidate_ticket")"
+      elif [ "$ticket_action" = "publish" ] || [ "$ticket_action" = "replace" ]; then
+        mv "$candidate_ticket" status/index-queue.json
+      else
+        queue_ok=0; overall_rc=1
+      fi
+    else
+      queue_ok=0; overall_rc=1
+    fi
+  fi
+  if [ "$queue_ok" != 1 ]; then
+    echo "ERROR: refusing index work because its immutable ticket could not be proven" >&2
+    rm -f .index-queue
+  fi
+  rm -f "$queue_file"
+  [ -z "${queue_core:-}" ] || rm -f "$queue_core"
+  [ -z "${candidate_ticket:-}" ] || rm -f "$candidate_ticket"
 fi
-jq -n --arg generated "$STAMP" --arg mode "$INDEX_BUILD_MODE" \
-  --arg code "$lex_code_commit" --arg articles "$articles_commit" --argjson entries "$queue" \
-  '{schema:"lex-index-build-queue/1",generated_at:$generated,mode:$mode,
-    build_code_commit:$code,articles_commit:$articles,entries:$entries}' \
-  > status/index-queue.json
 
 if [ "$INDEX_BUILD_MODE" = "prebuilt" ] && [ -f .index-queue ]; then
   echo "=== index builds deferred to the hash-pinned local prebuilt path ==="
@@ -352,13 +415,11 @@ if [ -f .index-queue ]; then
   while read -r pub repo; do
     echo "=== index ($pub) ==="
     corpus_commit=$(git -C "corpus-$pub" rev-parse HEAD)
-    configuration=$(configuration_for "$pub")
     index_args=(--corpus "corpus-$pub" --articles articles --out "index-$pub.db" \
       --keyfile signing-key.pem --embedding-model . --vectors "index-$pub.vectors" \
       --time-budget-minutes "$index_time_budget_minutes" \
       --code-commit "$lex_code_commit" --articles-commit "$articles_commit" \
-      --corpus-commit "$corpus_commit" --reviewed-configuration "$configuration" \
-      --work-enrichment "$configuration")
+      --corpus-commit "$corpus_commit")
     if dotnet run --project lex/src/Lex.Ingest -c Release -- index "${index_args[@]}"; then
       manifest="index-$pub.manifest.json"
       signature="index-$pub.manifest.sig"
@@ -371,13 +432,7 @@ if [ -f .index-queue ]; then
         --expected-code-commit "$lex_code_commit" \
         --expected-articles-commit "$articles_commit" \
         --corpus-manifest "corpus-$pub/manifest.json" \
-        --articles-generation articles/generation.json \
-        --reviewed-configuration "$configuration" \
-        --work-enrichment "$configuration")
-      configuration_asset=$(basename "$configuration")
-      cp "$configuration" "$configuration_asset"
-      artifact_files+=(--file "$configuration_asset")
-      release_assets+=("$configuration_asset")
+        --articles-generation articles/generation.json)
       if [ "$pub" = "eu-eurlex" ]; then
         cp lex/src/Lex.Sources.EurLex/eu-scope.json eu-scope.json
         artifact_files+=(--file eu-scope.json)
@@ -515,16 +570,9 @@ if [ -f .index-queue ]; then
   done < .index-queue
   rm -f .index-queue
 
-  # Deployment remains explicitly gated during the migration. Once the Lex production OIDC
-  # environment exists, setting this repository variable to 1 turns a verified publication into
-  # an immutable image and candidate revision instead of leaving production one release behind.
-  if [ "$published_artifacts" = "1" ] && [ "$deployment_blocked" = "0" ] \
-     && [ "${DEPLOY_AFTER_PUBLISH:-0}" = "1" ]; then
-    gh api repos/SFHAJJI/lex/dispatches -X POST \
-      -f event_type=verified_artifact_release \
-      -F 'client_payload[promote]=false' \
-      || { echo "--- deploy dispatch failed"; overall_rc=1; }
-  elif [ "$published_artifacts" = "1" ] && [ "$deployment_blocked" != "0" ]; then
+  # Candidate creation is a separate reviewed manual Lex deployment after every publisher
+  # release has been independently published and verified.
+  if [ "$published_artifacts" = "1" ] && [ "$deployment_blocked" != "0" ]; then
     echo "--- Container App deployment skipped: one or more artifacts are Blob-only"
   fi
 fi

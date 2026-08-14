@@ -26,8 +26,9 @@ be forced past the publication gates.
 - `publishers.json` - the fleet registry.
 - `fleet.sh` - the runner.
 - `status/` - per-publisher status records (the freshness feed, published on `fleet-status`).
-- `status/index-queue.json` - exact corpus, derived and Lex commits awaiting a local index build,
-  read from an immutable `fleet-status` commit.
+- `status/index-queue.json` - a content-addressed queue/2 ticket binding the exact corpus manifests,
+  derived generation and Lex build commit awaiting a local index build, read from an immutable
+  `fleet-status` commit. Retrying the same inputs reuses its ticket identity.
 - `LEX_OPS_TOKEN` authorizes cross-repository pushes. It is an interim OAuth token and must be
   replaced with a GitHub App installation token by the third publisher or 90 days, whichever
   comes first (spec §11.1).
@@ -52,22 +53,26 @@ crosses that platform limit, Blob remains canonical and Container App image depl
 until the measured VM/local-disk path is active; Fleet never deploys a mixture of old and new
 publisher releases.
 
-The derived `lex-articles` repository carries canonical `lex-articles-generation/2`
+The derived `lex-articles` repository carries canonical `lex-articles-generation/3`
 `generation.json`. Each publisher entry binds the exact corpus commit and manifest digest,
-materializing ingester commit, deriver commit and Git tree, reviewed-configuration digest, and
-extraction-profile set. Fleet accepts derived changes only when that deterministic input identity
+materializing ingester commit, deriver commit and Git tree, and extraction-profile set. Publisher
+source configuration is bound once at acquisition: EUR-Lex records the raw engineering-scope hash,
+while Legilux is code-only. Fleet accepts derived changes only when that deterministic input identity
 changes. This allows a failed run to resume after corpus publication and allows an intentional
 versioned extraction profile to regenerate results, while identical inputs producing a diff still
 fail as nondeterminism.
 
 The one-time `fresh-corpus-v4` workflow is the only supported migration from the legacy positional
-version layout. It requires the exact reviewed Lex `main` commit and an explicit confirmation,
+version layout. It requires the exact reviewed Lex `main` commit, approval through the protected
+`corpus-v4-migration` environment and an explicit confirmation,
 serializes with the nightly Fleet, builds Luxembourg and EU candidates in parallel beside disposable
 checkouts, and publishes only after the application proves every held baseline work and dated state
 is represented before body acquisition. A partial matrix success is resumable: an already committed
 v4 corpus is verified and reused only when its materializing Lex commit is identical. After both
 protected corpus heads exist, the workflow derives each publisher once, commits one canonical
 articles generation, and writes an immutable prebuilt-index ticket for the local DirectML builder.
+Cancellation after either Git publication is recoverable: exact existing bytes and the same ticket
+are verified and reused rather than reacquired, rewritten or queued twice.
 
 Dataset releases contain the same provision-version rows as compressed JSONL and Parquet. Some
 official EUR-Lex annex tables are tens of megabytes in one legal provision, so conversion uses a
@@ -102,20 +107,20 @@ whole evidence set with the pinned Key Vault key version and publishes the relea
 A failed run leaves the draft private. Standard GitHub-hosted runners are free because this
 repository is public.
 
-`DEPLOY_AFTER_PUBLISH=1` dispatches the Lex deployment workflow only after an artifact set was
-verified, signed and uploaded successfully. The deployment builds an immutable image identified by
-the code and artifact-manifest hashes, creates a zero-traffic Container Apps revision, and runs
-health, MCP and assistant smoke tests. Traffic remains unchanged. Promotion or rollback is a
-separate explicit operation naming both the expected current revision and the exact target.
+Publication never creates a Container Apps candidate. After both publisher releases have been
+independently verified, one reviewed manual Lex deployment consumes their exact manifest set,
+builds an immutable image, creates a zero-traffic revision and runs health, MCP and assistant smoke
+tests. Traffic remains unchanged. Promotion or rollback is a separate explicit operation naming
+both the expected current revision and the exact target.
 
 If a hosted runner deadline interrupts a large build but a trusted local or self-hosted builder
 finishes it, `publish-prebuilt-index` promotes those bytes without bypassing the same gates. The
 operator first uploads the DB and vector file to a private `staging/<publisher>/...` Blob prefix,
 then dispatches the workflow with their SHA-256 values and the exact lex-ops commit containing the
 build ticket. The OIDC runner re-downloads and checks the bytes, verifies that the index stamp binds
-the ticket's exact collection, corpus commit, derived-articles commit, Lex build commit, content
-digest and reviewed enrichment, resolves the pinned model
-and scope, creates the whole-artifact manifest, signs it with Key Vault, runs the public benchmark,
+the ticket's exact collection, corpus manifest, derived generation, Lex build commit and content
+digest, resolves the pinned model and publisher-bound source scope, creates the whole-artifact
+manifest, signs it with Key Vault, runs the public benchmark,
 and only then updates the immutable Blob/GitHub releases and deployment pointer. Staging is never a
 runtime source, and unsigned, mislabelled or hash-mismatched artifacts cannot be promoted.
 
@@ -123,7 +128,8 @@ The normal Fleet run remains the default for routine acquisition and derivation.
 always follows the prebuilt path because the measured build exceeds the hosted-runner window. Do not
 use `force_index_publisher` merely to repeat that long build: use the commits in
 `status/index-queue.json`, upload only the DB and vector artifacts, and let
-`publish-prebuilt-index` perform provenance checks, signing, benchmarking and candidate deployment.
+`publish-prebuilt-index` perform provenance checks, signing and benchmarking. Candidate deployment
+remains a separate reviewed manual action after both publisher artifacts are ready.
 
 During the dual-reader rollback window, `LEX_SIGNING_KEY` still signs only the index's embedded
 compatibility stamp. The application does not trust that adjacent public key. Runtime trust comes

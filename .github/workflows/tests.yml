@@ -20,4 +20,6 @@ jobs:
       - name: Run dataset conversion regressions
         run: python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Validate fleet shell
-        run: bash -n fleet.sh fleet-status.sh require-ancestor.sh publish-prebuilt-index.sh
+        run: >-
+          bash -n fleet.sh fleet-status.sh require-ancestor.sh publish-prebuilt-index.sh
+          scripts/fresh-corpus-v4.sh scripts/v4-release-contract.sh

@@ -41,16 +41,17 @@ repo=$(jq -er --arg pub "$PUBLISHER" \
 git fetch --no-tags origin \
   +refs/heads/fleet-status:refs/remotes/origin/fleet-status
 bash require-ancestor.sh . "$QUEUE_COMMIT" refs/remotes/origin/fleet-status "queue commit"
-ticket=$(git show "$QUEUE_COMMIT:status/index-queue.json")
-printf '%s' "$ticket" | jq -e --arg pub "$PUBLISHER" --arg repo "$repo" \
+ticket_file=$(mktemp)
+git show "$QUEUE_COMMIT:status/index-queue.json" > "$ticket_file"
+bash scripts/v4-release-contract.sh validate-ticket "$ticket_file"
+jq -e --arg pub "$PUBLISHER" --arg repo "$repo" \
   --arg corpus "$CORPUS_COMMIT" --arg code "$BUILD_CODE_COMMIT" \
   --arg articles "$ARTICLES_COMMIT" \
-  '.schema == "lex-index-build-queue/1"
-   and .mode == "prebuilt"
+  '.mode == "prebuilt"
    and .build_code_commit == $code
    and .articles_commit == $articles
    and ([.entries[] | select(.collection == $pub and .corpus_repo == $repo
-          and .corpus_commit == $corpus)] | length == 1)' >/dev/null \
+          and .corpus_commit == $corpus)] | length == 1)' "$ticket_file" >/dev/null \
   || { echo "ERROR: publication inputs do not match the immutable build ticket" >&2; exit 2; }
 
 # The checked-out Lex tree supplies the publication tooling. The index itself may have been built
@@ -335,6 +336,12 @@ git -C articles-ticket checkout --detach "$ARTICLES_COMMIT"
 test "$(git -C articles-ticket rev-parse HEAD)" = "$ARTICLES_COMMIT"
 bash require-ancestor.sh articles-ticket "$ARTICLES_COMMIT" refs/remotes/origin/main \
   "ticketed articles commit"
+source_configuration=-
+[ "$PUBLISHER" = "eu-eurlex" ] \
+  && source_configuration=lex/src/Lex.Sources.EurLex/eu-scope.json
+bash scripts/v4-release-contract.sh validate-source "$ticket_file" "$PUBLISHER" "$repo" \
+  "$CORPUS_COMMIT" "$BUILD_CODE_COMMIT" "$ARTICLES_COMMIT" \
+  corpus/manifest.json articles-ticket/generation.json "$source_configuration"
 
 cp lex/deploy/embedding-model/model-manifest.json model-manifest.json
 model_revision=$(jq -r .revision model-manifest.json)
@@ -353,22 +360,12 @@ dotnet run --project lex/src/Lex.Ingest -c Release -- embedding-smoke \
 artifact_files=(--file "$index" --file "$vectors" --file model-manifest.json \
   --file model.onnx --file sentencepiece.bpe.model)
 release_assets=("$index" "$vectors" model-manifest.json model.onnx sentencepiece.bpe.model)
-case "$PUBLISHER" in
-  lu-legilux) configuration=lu-work-enrichment.json ;;
-  eu-eurlex) configuration=eu-work-enrichment.json ;;
-  *) echo "ERROR: unsupported publisher $PUBLISHER" >&2; exit 2 ;;
-esac
-cp "lex/config/$configuration" "$configuration"
 verify_stamp_args=(--db "$index" --expected-collection "$PUBLISHER" \
   --expected-corpus-commit "$CORPUS_COMMIT" \
   --expected-code-commit "$BUILD_CODE_COMMIT" \
   --expected-articles-commit "$ARTICLES_COMMIT" \
   --corpus-manifest corpus/manifest.json \
-  --articles-generation articles-ticket/generation.json \
-  --reviewed-configuration "$configuration" \
-  --work-enrichment "$configuration")
-artifact_files+=(--file "$configuration")
-release_assets+=("$configuration")
+  --articles-generation articles-ticket/generation.json)
 if [ "$PUBLISHER" = "eu-eurlex" ]; then
   cp lex/src/Lex.Sources.EurLex/eu-scope.json eu-scope.json
   artifact_files+=(--file eu-scope.json)
