@@ -8,6 +8,16 @@ mkdir -p status
 overall_rc=0
 FORCE_INDEX_PUBLISHER="${FORCE_INDEX_PUBLISHER:-}"
 INDEX_BUILD_MODE="${INDEX_BUILD_MODE:-prebuilt}"
+lex_code_commit=$(git -C lex rev-parse HEAD)
+deriver_tree_id=$(git -C lex rev-parse HEAD:src/Lex.Derive)
+
+configuration_for() {
+  case "$1" in
+    lu-legilux) printf '%s\n' lex/config/lu-work-enrichment.json ;;
+    eu-eurlex) printf '%s\n' lex/config/eu-work-enrichment.json ;;
+    *) echo "ERROR: unsupported publisher $1" >&2; return 2 ;;
+  esac
+}
 
 case "$INDEX_BUILD_MODE" in
   hosted|prebuilt) ;;
@@ -80,7 +90,11 @@ for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
       works="$prev_works"
       outcome="ran_no_change"
       echo "--- recovery snapshot: verified committed $pub head; publisher poll skipped"
-    elif dotnet run --project lex/src/Lex.Ingest -c Release -- ingest --publisher "$pub" --corpus "$dir"; then
+    else
+      ingest_args=(--publisher "$pub" --corpus "$dir" --code-commit "$lex_code_commit")
+      [ "$pub" = "eu-eurlex" ] \
+        && ingest_args+=(--scope lex/src/Lex.Sources.EurLex/eu-scope.json)
+      if dotnet run --project lex/src/Lex.Ingest -c Release -- ingest "${ingest_args[@]}"; then
       new_works=$(jq -r '.works // 0' "$dir/manifest.json" 2>/dev/null || echo 0)
       works="$new_works"
 
@@ -109,8 +123,9 @@ for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
       # Index rebuild happens AFTER the derive stage (lex-index/3 needs --articles;
       # an index built without provisions has a dead search). Remember who advanced.
       [ "$outcome" = "ran_committed" ] && echo "$pub $repo" >> .index-queue
-    else
-      outcome="failed_ingest"; overall_rc=1
+      else
+        outcome="failed_ingest"; overall_rc=1
+      fi
     fi
   else
     outcome="failed_clone"; overall_rc=1
@@ -122,10 +137,11 @@ for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
 done
 
 # ---- derived consumption layer (lex-articles): regenerate, guard, push (§ blueprint inc 4).
-# Determinism guard: generation.json records the exact corpus heads and the content fingerprint
-# of the versioned extractor. Derived files may change only when that input identity changes.
-# This permits a retry after corpus publication or an intentional new extraction profile, while
-# an output diff from identical inputs remains a hard nondeterminism failure.
+# Determinism guard: canonical generation/2 records each exact corpus head and manifest digest,
+# the materializing ingester, deriver commit/tree, reviewed configuration, and profile set.
+# Derived files may change only when that complete input identity changes. This permits a retry
+# after corpus publication or an intentional new extraction profile, while an output diff from
+# identical inputs remains a hard nondeterminism failure.
 echo "=== derive (lex-articles) ==="
 derive_outcome="failed"
 if git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/SFHAJJI/lex-articles.git" articles; then
@@ -137,25 +153,25 @@ if git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/SFHAJJI/le
       *) echo "--- derive $pub: skipped because ingest outcome is $publisher_outcome"; continue ;;
     esac
     [ -d "corpus-$pub" ] || continue
-    dotnet run --project lex/src/Lex.Ingest -c Release -- derive --publisher "$pub" --corpus "corpus-$pub" --out articles || derive_ok=0
+    corpus_commit=$(git -C "corpus-$pub" rev-parse HEAD)
+    configuration=$(configuration_for "$pub")
+    dotnet run --project lex/src/Lex.Ingest -c Release -- derive \
+      --publisher "$pub" --corpus "corpus-$pub" --out articles \
+      --code-commit "$lex_code_commit" --deriver-tree-id "$deriver_tree_id" \
+      --corpus-commit "$corpus_commit" --reviewed-configuration "$configuration" \
+      || derive_ok=0
   done
   [ "$derive_ok" = 1 ] && { dotnet run --project lex/src/Lex.Ingest -c Release -- catalog --articles articles || derive_ok=0; }
   if [ "$derive_ok" = 1 ]; then
-    deriver_fingerprint=$(git -C lex rev-parse HEAD:src/Lex.Derive)
-    generation=$(jq -n --arg fingerprint "$deriver_fingerprint" \
-      '{schema:"lex-articles-generation/1", deriver_fingerprint:$fingerprint, corpus_commits:{}}')
-    for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
-      [ -d "corpus-$pub/.git" ] || continue
-      corpus_commit=$(git -C "corpus-$pub" rev-parse HEAD)
-      generation=$(jq --arg pub "$pub" --arg commit "$corpus_commit" \
-        '.corpus_commits[$pub] = $commit' <<<"$generation")
-    done
-    printf '%s\n' "$generation" > articles/generation.json
+    jq -e '.schema == "lex-articles-generation/2"' articles/generation.json >/dev/null \
+      || { echo "DERIVE: missing canonical generation/2 provenance"; derive_ok=0; }
 
     changed=$(git -C articles status --porcelain | wc -l)
     input_changed=0
     [ -n "$(git -C articles status --porcelain -- generation.json)" ] && input_changed=1
-    if [ "$changed" -gt 0 ] && [ "$input_changed" -eq 0 ]; then
+    if [ "$derive_ok" != 1 ]; then
+      derive_outcome="failed_provenance"; overall_rc=1
+    elif [ "$changed" -gt 0 ] && [ "$input_changed" -eq 0 ]; then
       echo "DERIVE NONDETERMINISM: $changed derived files changed from identical recorded inputs. Committing nothing."
       derive_outcome="failed_nondeterminism"; overall_rc=1
     elif [ "$changed" -gt 0 ]; then
@@ -274,7 +290,6 @@ if [ "$derive_outcome" = "ran_committed" ] || [ "$derive_outcome" = "ran_no_chan
 fi
 
 queue='[]'
-lex_code_commit=$(git -C lex rev-parse HEAD)
 articles_commit=$(git -C articles rev-parse HEAD 2>/dev/null || true)
 if [ -f .index-queue ]; then
   while read -r pub repo; do
@@ -337,15 +352,13 @@ if [ -f .index-queue ]; then
   while read -r pub repo; do
     echo "=== index ($pub) ==="
     corpus_commit=$(git -C "corpus-$pub" rev-parse HEAD)
+    configuration=$(configuration_for "$pub")
     index_args=(--corpus "corpus-$pub" --articles articles --out "index-$pub.db" \
       --keyfile signing-key.pem --embedding-model . --vectors "index-$pub.vectors" \
       --time-budget-minutes "$index_time_budget_minutes" \
       --code-commit "$lex_code_commit" --articles-commit "$articles_commit" \
-      --corpus-commit "$corpus_commit")
-    if [ "$pub" = "eu-eurlex" ]; then
-      cp lex/config/eu-work-enrichment.json eu-work-enrichment.json
-      index_args+=(--work-enrichment eu-work-enrichment.json)
-    fi
+      --corpus-commit "$corpus_commit" --reviewed-configuration "$configuration" \
+      --work-enrichment "$configuration")
     if dotnet run --project lex/src/Lex.Ingest -c Release -- index "${index_args[@]}"; then
       manifest="index-$pub.manifest.json"
       signature="index-$pub.manifest.sig"
@@ -356,12 +369,19 @@ if [ -f .index-queue ]; then
       verify_stamp_args=(--db "index-$pub.db" --expected-collection "$pub" \
         --expected-corpus-commit "$corpus_commit" \
         --expected-code-commit "$lex_code_commit" \
-        --expected-articles-commit "$articles_commit")
+        --expected-articles-commit "$articles_commit" \
+        --corpus-manifest "corpus-$pub/manifest.json" \
+        --articles-generation articles/generation.json \
+        --reviewed-configuration "$configuration" \
+        --work-enrichment "$configuration")
+      configuration_asset=$(basename "$configuration")
+      cp "$configuration" "$configuration_asset"
+      artifact_files+=(--file "$configuration_asset")
+      release_assets+=("$configuration_asset")
       if [ "$pub" = "eu-eurlex" ]; then
         cp lex/src/Lex.Sources.EurLex/eu-scope.json eu-scope.json
-        artifact_files+=(--file eu-scope.json --file eu-work-enrichment.json)
-        release_assets+=(eu-scope.json eu-work-enrichment.json)
-        verify_stamp_args+=(--work-enrichment eu-work-enrichment.json)
+        artifact_files+=(--file eu-scope.json)
+        release_assets+=(eu-scope.json)
       fi
       if ! dotnet run --project lex/src/Lex.Ingest -c Release -- verify stamp \
            "${verify_stamp_args[@]}"; then

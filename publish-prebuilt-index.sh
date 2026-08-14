@@ -101,16 +101,26 @@ dotnet run --project lex/src/Lex.Ingest -c Release -- embedding-smoke \
 artifact_files=(--file "$index" --file "$vectors" --file model-manifest.json \
   --file model.onnx --file sentencepiece.bpe.model)
 release_assets=("$index" "$vectors" model-manifest.json model.onnx sentencepiece.bpe.model)
+case "$PUBLISHER" in
+  lu-legilux) configuration=lu-work-enrichment.json ;;
+  eu-eurlex) configuration=eu-work-enrichment.json ;;
+  *) echo "ERROR: unsupported publisher $PUBLISHER" >&2; exit 2 ;;
+esac
+cp "lex/config/$configuration" "$configuration"
 verify_stamp_args=(--db "$index" --expected-collection "$PUBLISHER" \
   --expected-corpus-commit "$CORPUS_COMMIT" \
   --expected-code-commit "$BUILD_CODE_COMMIT" \
-  --expected-articles-commit "$ARTICLES_COMMIT")
+  --expected-articles-commit "$ARTICLES_COMMIT" \
+  --corpus-manifest corpus/manifest.json \
+  --articles-generation articles-ticket/generation.json \
+  --reviewed-configuration "$configuration" \
+  --work-enrichment "$configuration")
+artifact_files+=(--file "$configuration")
+release_assets+=("$configuration")
 if [ "$PUBLISHER" = "eu-eurlex" ]; then
   cp lex/src/Lex.Sources.EurLex/eu-scope.json eu-scope.json
-  cp lex/config/eu-work-enrichment.json eu-work-enrichment.json
-  verify_stamp_args+=(--work-enrichment eu-work-enrichment.json)
-  artifact_files+=(--file eu-scope.json --file eu-work-enrichment.json)
-  release_assets+=(eu-scope.json eu-work-enrichment.json)
+  artifact_files+=(--file eu-scope.json)
+  release_assets+=(eu-scope.json)
 fi
 dotnet run --project lex/src/Lex.Ingest -c Release -- verify stamp \
   "${verify_stamp_args[@]}"

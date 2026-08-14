@@ -52,11 +52,22 @@ crosses that platform limit, Blob remains canonical and Container App image depl
 until the measured VM/local-disk path is active; Fleet never deploys a mixture of old and new
 publisher releases.
 
-The derived `lex-articles` repository carries `generation.json`, which records every enabled
-corpus head and the Git tree fingerprint of `src/Lex.Derive`. Fleet accepts derived changes only
-when that deterministic input identity changes. This allows a failed run to resume after corpus
-publication and allows an intentional versioned extraction profile to regenerate results, while
-identical inputs producing a diff still fail as nondeterminism.
+The derived `lex-articles` repository carries canonical `lex-articles-generation/2`
+`generation.json`. Each publisher entry binds the exact corpus commit and manifest digest,
+materializing ingester commit, deriver commit and Git tree, reviewed-configuration digest, and
+extraction-profile set. Fleet accepts derived changes only when that deterministic input identity
+changes. This allows a failed run to resume after corpus publication and allows an intentional
+versioned extraction profile to regenerate results, while identical inputs producing a diff still
+fail as nondeterminism.
+
+The one-time `fresh-corpus-v4` workflow is the only supported migration from the legacy positional
+version layout. It requires the exact reviewed Lex `main` commit and an explicit confirmation,
+serializes with the nightly Fleet, builds Luxembourg and EU candidates in parallel beside disposable
+checkouts, and publishes only after the application proves every held baseline work and dated state
+is represented before body acquisition. A partial matrix success is resumable: an already committed
+v4 corpus is verified and reused only when its materializing Lex commit is identical. After both
+protected corpus heads exist, the workflow derives each publisher once, commits one canonical
+articles generation, and writes an immutable prebuilt-index ticket for the local DirectML builder.
 
 Dataset releases contain the same provision-version rows as compressed JSONL and Parquet. Some
 official EUR-Lex annex tables are tens of megabytes in one legal provision, so conversion uses a

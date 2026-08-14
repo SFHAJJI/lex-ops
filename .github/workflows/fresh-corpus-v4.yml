@@ -1,0 +1,93 @@
+name: fresh-corpus-v4
+
+on:
+  workflow_dispatch:
+    inputs:
+      lex_commit:
+        description: Full reviewed Lex main commit that writes lex-corpus/4
+        required: true
+        type: string
+      confirmation:
+        description: Type REBUILD_LEX_CORPUS_V4_ONCE
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly-fleet
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Require the one-time confirmation and a protected Lex commit
+        shell: bash
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          LEX_COMMIT: ${{ inputs.lex_commit }}
+        run: |
+          set -euo pipefail
+          [ "$CONFIRMATION" = "REBUILD_LEX_CORPUS_V4_ONCE" ] \
+            || { echo "::error::exact one-time confirmation is required"; exit 2; }
+          [[ "$LEX_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::Lex commit must be a full lowercase SHA"; exit 2; }
+          git ls-remote https://github.com/SFHAJJI/lex.git refs/heads/main \
+            | cut -f1 | grep -Fx "$LEX_COMMIT"
+
+  corpus:
+    needs: gate
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        publisher: [lu-legilux, eu-eurlex]
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: SFHAJJI/lex
+          path: lex
+          fetch-depth: 0
+          ref: ${{ inputs.lex_commit }}
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 10.0.x
+      - name: Build and publish one complete corpus replacement
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.LEX_OPS_TOKEN }}
+          LEX_COMMIT: ${{ inputs.lex_commit }}
+          PUBLISHER: ${{ matrix.publisher }}
+        run: bash scripts/fresh-corpus-v4.sh corpus
+
+  derive:
+    needs: corpus
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: SFHAJJI/lex
+          path: lex
+          fetch-depth: 0
+          ref: ${{ inputs.lex_commit }}
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 10.0.x
+      - name: Derive once and publish the immutable DirectML build ticket
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.LEX_OPS_TOKEN }}
+          LEX_COMMIT: ${{ inputs.lex_commit }}
+        run: bash scripts/fresh-corpus-v4.sh derive
