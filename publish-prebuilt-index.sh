@@ -44,6 +44,7 @@ bash require-ancestor.sh . "$QUEUE_COMMIT" refs/remotes/origin/fleet-status "que
 ticket_file=$(mktemp)
 git show "$QUEUE_COMMIT:status/index-queue.json" > "$ticket_file"
 bash scripts/v4-release-contract.sh validate-ticket "$ticket_file"
+ticket_id=$(jq -er .ticket_id "$ticket_file")
 jq -e --arg pub "$PUBLISHER" --arg repo "$repo" \
   --arg corpus "$CORPUS_COMMIT" --arg code "$BUILD_CODE_COMMIT" \
   --arg articles "$ARTICLES_COMMIT" \
@@ -71,7 +72,7 @@ signature="index-$PUBLISHER.manifest.sig"
 cleanup_receipt="staging-cleanup-$PUBLISHER.json"
 cleanup_manifest="staging-cleanup-$PUBLISHER.manifest.json"
 cleanup_signature="staging-cleanup-$PUBLISHER.manifest.sig"
-tag="index-$PUBLISHER-$QUEUE_COMMIT"
+tag="index-$PUBLISHER-$ticket_id"
 stamp=$(date -u +%FT%TZ)
 
 cleanup_exact_blob() {
@@ -189,7 +190,7 @@ if public_state=$(gh release view "$tag" --repo "$repo" \
     --root "$retry_dir" --manifest "$retry_dir/$cleanup_manifest" \
     --signature "$retry_dir/$cleanup_signature" \
     --trust-roots lex/deploy/trusted-artifact-roots.json
-  jq -e --arg publisher "$PUBLISHER" --arg queue "$QUEUE_COMMIT" \
+  jq -e --arg publisher "$PUBLISHER" --arg ticket "$ticket_id" \
       --arg corpus "$CORPUS_COMMIT" --arg code "$BUILD_CODE_COMMIT" \
       --arg articles "$ARTICLES_COMMIT" --arg prefix "$STAGING_PREFIX" \
       --arg index "$STAGING_PREFIX/$index" --arg vectors "$STAGING_PREFIX/$vectors" \
@@ -201,7 +202,7 @@ if public_state=$(gh release view "$tag" --repo "$repo" \
       --arg vectors_sha "$EXPECTED_VECTORS_SHA256" --arg tag "$tag" '
         .schema == "lex-staging-cleanup-receipt/1"
         and .purpose == "delete-exact-published-prebuilt-staging"
-        and .publisher == $publisher and .queue_commit == $queue
+        and .publisher == $publisher and .queue_ticket_id == $ticket
         and .corpus_commit == $corpus and .build_code_commit == $code
         and .articles_commit == $articles and .staging_prefix == $prefix
         and .release_tag == $tag
@@ -379,7 +380,7 @@ dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
   --root . "${artifact_files[@]}" --manifest "$manifest" \
   --key-id "$ARTIFACT_KEY_ID" --code-commit "$BUILD_CODE_COMMIT" \
   --source "collection=$PUBLISHER" --source "corpus_commit=$CORPUS_COMMIT" \
-  --source "articles_commit=$ARTICLES_COMMIT" --source "queue_commit=$QUEUE_COMMIT" \
+  --source "articles_commit=$ARTICLES_COMMIT" --source "queue_ticket_id=$ticket_id" \
   --source "publication_tool_commit=$publication_tool_commit" \
   --source "build_origin=hash-pinned-private-staging"
 digest=$(openssl dgst -sha256 -binary "$manifest" | openssl base64 -A)
@@ -412,7 +413,7 @@ dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
     --root . --file "$benchmark" --manifest "$benchmark_manifest" \
     --key-id "$ARTIFACT_KEY_ID" --code-commit "$publication_tool_commit" \
     --source "collection=$PUBLISHER" --source "corpus_commit=$CORPUS_COMMIT" \
-    --source "articles_commit=$ARTICLES_COMMIT" --source "queue_commit=$QUEUE_COMMIT" \
+    --source "articles_commit=$ARTICLES_COMMIT" --source "queue_ticket_id=$ticket_id" \
     --source "index_manifest_sha256=$manifest_id"
 benchmark_digest=$(openssl dgst -sha256 -binary "$benchmark_manifest" | openssl base64 -A)
 az_retry az keyvault key sign --vault-name "$AZURE_KEY_VAULT" --name "$AZURE_KEY_NAME" \
@@ -434,7 +435,7 @@ for asset in "${release_assets[@]}"; do
     --argjson size "$(wc -c < "$asset" | tr -d ' ')" \
     '{name:$name,sha256:$sha,size:$size}' >> "$asset_inventory"
 done
-jq -cS -n --arg publisher "$PUBLISHER" --arg queue "$QUEUE_COMMIT" \
+jq -cS -n --arg publisher "$PUBLISHER" --arg ticket "$ticket_id" \
   --arg corpus "$CORPUS_COMMIT" --arg code "$BUILD_CODE_COMMIT" \
   --arg articles "$ARTICLES_COMMIT" --arg prefix "$STAGING_PREFIX" \
   --arg index "$STAGING_PREFIX/$index" --arg index_etag "$index_etag" \
@@ -447,7 +448,7 @@ jq -cS -n --arg publisher "$PUBLISHER" --arg queue "$QUEUE_COMMIT" \
   --slurpfile assets "$asset_inventory" \
   '{schema:"lex-staging-cleanup-receipt/1",
     purpose:"delete-exact-published-prebuilt-staging",generated_at:$generated,
-    publisher:$publisher,queue_commit:$queue,corpus_commit:$corpus,
+    publisher:$publisher,queue_ticket_id:$ticket,corpus_commit:$corpus,
     build_code_commit:$code,articles_commit:$articles,staging_prefix:$prefix,
     release_tag:$tag,index_manifest_sha256:$manifest,
     staging:{index:{name:$index,etag:$index_etag,sha256:$index_sha},
@@ -461,7 +462,7 @@ dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
   --root . --file "$cleanup_receipt" --manifest "$cleanup_manifest" \
   --key-id "$ARTIFACT_KEY_ID" --code-commit "$BUILD_CODE_COMMIT" \
   --source "purpose=delete-exact-published-prebuilt-staging" \
-  --source "publisher=$PUBLISHER" --source "queue_commit=$QUEUE_COMMIT" \
+  --source "publisher=$PUBLISHER" --source "queue_ticket_id=$ticket_id" \
   --source "index_manifest_sha256=$manifest_id"
 cleanup_digest=$(openssl dgst -sha256 -binary "$cleanup_manifest" | openssl base64 -A)
 az_retry az keyvault key sign --vault-name "$AZURE_KEY_VAULT" --name "$AZURE_KEY_NAME" \
@@ -516,7 +517,7 @@ if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
     || { echo "ERROR: refusing to mutate an existing public or prerelease tag" >&2; exit 1; }
 else
   gh release create "$tag" --repo "$repo" --draft \
-    --title "index-$PUBLISHER ${QUEUE_COMMIT:0:12}" \
+    --title "index-$PUBLISHER ${ticket_id:0:12}" \
     --notes "Signed index and whole-release manifest. Verify against the public key pinned by Lex before use. Free to download and use; redistribution of any build reserved (NOTICE layer 2)."
 fi
 gh release upload "$tag" "${release_assets[@]}" --repo "$repo" --clobber
