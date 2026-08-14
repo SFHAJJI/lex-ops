@@ -4,12 +4,27 @@ on:
   workflow_dispatch:
     inputs:
       evaluation_release:
-        description: Exact draft assistant-evaluation release tag
+        description: Exact retry-safe assistant-evaluation release tag
         required: true
         type: string
       candidate_revision:
         description: Exact zero-traffic Container Apps revision evaluated
         required: true
+        type: string
+      bootstrap_rollback_revision:
+        description: Optional first-release equivalent fallback created before the candidate
+        required: false
+        default: ""
+        type: string
+      bootstrap_canonical_template_digest:
+        description: Optional canonical R/C revision-template digest (excluding revisionSuffix)
+        required: false
+        default: ""
+        type: string
+      bootstrap_expected_image_digest:
+        description: Optional exact shared R/C image digest
+        required: false
+        default: ""
         type: string
 
 permissions:
@@ -17,7 +32,9 @@ permissions:
   id-token: write
 
 concurrency:
-  group: assistant-evaluation-${{ inputs.evaluation_release }}
+  # Serialize every candidate lifecycle inside lex-ops. GitHub concurrency is repository-scoped;
+  # the production-environment/branch audit remains the cross-repository sequencing prerequisite.
+  group: lex-production
   cancel-in-progress: false
 
 jobs:
@@ -30,16 +47,22 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       EVALUATION_RELEASE: ${{ inputs.evaluation_release }}
       CANDIDATE_REVISION: ${{ inputs.candidate_revision }}
+      BOOTSTRAP_ROLLBACK_REVISION: ${{ inputs.bootstrap_rollback_revision }}
+      BOOTSTRAP_CANONICAL_TEMPLATE_DIGEST: ${{ inputs.bootstrap_canonical_template_digest }}
+      BOOTSTRAP_EXPECTED_IMAGE_DIGEST: ${{ inputs.bootstrap_expected_image_digest }}
       RESOURCE_GROUP: rg-platform
       CONTAINER_APP: ca-lex-web
       AZURE_KEY_VAULT: ${{ vars.AZURE_KEY_VAULT }}
       AZURE_KEY_NAME: ${{ vars.AZURE_KEY_NAME }}
       AZURE_KEY_VERSION: ${{ vars.AZURE_KEY_VERSION }}
       ARTIFACT_KEY_ID: ${{ vars.ARTIFACT_KEY_ID }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Download the exact draft evidence
+      - name: Download the exact draft or immutable public evidence
         shell: bash
         run: |
           set -euo pipefail
@@ -47,34 +70,80 @@ jobs:
             || { echo "::error::invalid evaluation release tag"; exit 2; }
           [[ "$CANDIDATE_REVISION" =~ ^ca-lex-web--[a-z0-9-]+$ ]] \
             || { echo "::error::invalid candidate revision"; exit 2; }
-          gh release view "$EVALUATION_RELEASE" --json isDraft,assets \
-            --jq '
-              .isDraft == true
+          supplied=0
+          for value in BOOTSTRAP_ROLLBACK_REVISION \
+              BOOTSTRAP_CANONICAL_TEMPLATE_DIGEST BOOTSTRAP_EXPECTED_IMAGE_DIGEST; do
+            [ -n "${!value}" ] && supplied=$((supplied + 1))
+          done
+          [ "$supplied" = 0 ] || [ "$supplied" = 3 ] \
+            || { echo "::error::bootstrap equivalence inputs must be supplied together"; exit 2; }
+          bootstrap_mode=false
+          if [ "$supplied" = 3 ]; then
+            bootstrap_mode=true
+            [[ "$BOOTSTRAP_ROLLBACK_REVISION" =~ ^ca-lex-web--[a-z0-9-]+$ ]] \
+              && [ "$BOOTSTRAP_ROLLBACK_REVISION" != "$CANDIDATE_REVISION" ] \
+              || { echo "::error::invalid bootstrap fallback revision"; exit 2; }
+            [[ "$BOOTSTRAP_CANONICAL_TEMPLATE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
+              && [[ "$BOOTSTRAP_EXPECTED_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
+              || { echo "::error::invalid bootstrap equivalence digest"; exit 2; }
+          fi
+          echo "BOOTSTRAP_MODE=$bootstrap_mode" >> "$GITHUB_ENV"
+          allowed=$(jq -cn --argjson bootstrap "$bootstrap_mode" '
+            [
+              "assistant-eval-report.json",
+              "assistant-cases-v3.json",
+              "assistant-cases-v3.review.json",
+              "assistant-cases-v3.review.sig",
+              "assistant-browser-evidence.json",
+              "assistant-eval.manifest.json",
+              "assistant-eval.manifest.sig"
+            ] + (if $bootstrap then [
+              "bootstrap-equivalence.json",
+              "bootstrap-equivalence.manifest.json",
+              "bootstrap-equivalence.manifest.sig"
+            ] else [] end)')
+          release_state=$(gh release view "$EVALUATION_RELEASE" \
+            --json isDraft,isPrerelease,tagName,assets)
+          required=$(jq -cn '[
+            "assistant-eval-report.json",
+            "assistant-cases-v3.json",
+            "assistant-cases-v3.review.json",
+            "assistant-cases-v3.review.sig"
+          ]')
+          if printf '%s' "$release_state" | jq -e \
+              --arg tag "$EVALUATION_RELEASE" --argjson allowed "$allowed" \
+              --argjson required "$required" '
+              .tagName == $tag and .isDraft == true and .isPrerelease == false
               and (([.assets[].name] | length) >= 4)
-              and (([.assets[].name] | length) <= 7)
-              and (([
-                "assistant-eval-report.json",
-                "assistant-cases-v3.json",
-                "assistant-cases-v3.review.json",
-                "assistant-cases-v3.review.sig"
-              ] - [.assets[].name]) | length == 0)
-              and (([.assets[].name] - [
-                "assistant-eval-report.json",
-                "assistant-cases-v3.json",
-                "assistant-cases-v3.review.json",
-                "assistant-cases-v3.review.sig",
-                "assistant-browser-evidence.json",
-                "assistant-eval.manifest.json",
-                "assistant-eval.manifest.sig"
-              ]) | length == 0)' | grep -qx true \
-            || { echo "::error::evaluation release is not an exact retry-safe draft"; exit 2; }
-          mkdir evidence
-          gh release download "$EVALUATION_RELEASE" --dir evidence \
-            --pattern 'assistant-eval-report.json' \
-            --pattern 'assistant-cases-v3.json' \
-            --pattern 'assistant-cases-v3.review.json' \
-            --pattern 'assistant-cases-v3.review.sig'
-          test "$(find evidence -maxdepth 1 -type f | wc -l)" -eq 4
+              and (([.assets[].name] | unique | length) == ([.assets[].name] | length))
+              and (($required - [.assets[].name]) | length == 0)
+              and (([.assets[].name] - $allowed) | length == 0)' >/dev/null; then
+            echo "PUBLIC_RETRY=false" >> "$GITHUB_ENV"
+            mkdir evidence
+            gh release download "$EVALUATION_RELEASE" --dir evidence \
+              --pattern 'assistant-eval-report.json' \
+              --pattern 'assistant-cases-v3.json' \
+              --pattern 'assistant-cases-v3.review.json' \
+              --pattern 'assistant-cases-v3.review.sig'
+            test "$(find evidence -maxdepth 1 -type f | wc -l)" -eq 4
+          elif printf '%s' "$release_state" | jq -e \
+              --arg tag "$EVALUATION_RELEASE" --argjson allowed "$allowed" '
+              .tagName == $tag and .isDraft == false and .isPrerelease == false
+              and ([.assets[].name] | sort) == ($allowed | sort)' >/dev/null; then
+            echo "PUBLIC_RETRY=true" >> "$GITHUB_ENV"
+            mkdir evidence
+            while IFS= read -r asset; do
+              curl --fail --show-error --silent --location --retry 5 --retry-all-errors \
+                --retry-delay 2 \
+                "https://github.com/SFHAJJI/lex-ops/releases/download/$EVALUATION_RELEASE/$asset" \
+                -o "evidence/$asset"
+            done < <(printf '%s' "$allowed" | jq -r '.[]')
+            [ "$(find evidence -maxdepth 1 -type f | wc -l)" = "$(printf '%s' "$allowed" | jq length)" ] \
+              || { echo "::error::public release anonymous asset read-back is incomplete"; exit 1; }
+          else
+            echo "::error::evaluation release is not an exact retry-safe release"
+            exit 2
+          fi
           python3 scripts/assistant_evaluation_identity.py \
             evidence/assistant-eval-report.json \
             "$CANDIDATE_REVISION" "$EVALUATION_RELEASE" "$GITHUB_ENV"
@@ -98,6 +167,7 @@ jobs:
           cache-dependency-path: lex/web/package-lock.json
 
       - name: Install the exact browser evaluation runtime
+        if: env.PUBLIC_RETRY != 'true'
         working-directory: lex/web
         shell: bash
         run: |
@@ -114,6 +184,8 @@ jobs:
           done
           [[ "$AZURE_KEY_VERSION" =~ ^[0-9a-f]{32}$ ]] \
             || { echo "::error::artifact key version is invalid"; exit 1; }
+          [ "$ARTIFACT_KEY_ID" = "keyvault-lex-v2" ] \
+            || { echo "::error::artifact key id is not the Lex v2 trust root"; exit 1; }
           git -C lex merge-base --is-ancestor "$CODE_COMMIT" refs/remotes/origin/main \
             || { echo "::error::evaluated code is not on Lex main"; exit 2; }
 
@@ -129,10 +201,14 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          . lex/scripts/deploy/az-retry.sh
+          . lex/scripts/deploy/az-reauth.sh
+          az_reauth
           candidate_owned=false
           cleanup_candidate() {
             local attempt active
             [ "$candidate_owned" = "true" ] || return 0
+            az_reauth || true
             for attempt in 1 2 3 4 5; do
               az containerapp revision deactivate -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
                 --revision "$CANDIDATE_REVISION" >/dev/null 2>&1 || true
@@ -151,26 +227,115 @@ jobs:
             exit "$status"
           }
           trap finish EXIT TERM INT
-          app_id=$(az containerapp show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+          app_id=$(az_retry az containerapp show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
             --query id -o tsv)
-          candidate_fqdn=$(az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+          candidate_fqdn=$(az_retry az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
             --revision "$CANDIDATE_REVISION" --query properties.fqdn -o tsv)
-          candidate_traffic=$(az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+          candidate_traffic=$(az_retry az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
             --revision "$CANDIDATE_REVISION" --query properties.trafficWeight -o tsv)
           [ -n "$app_id" ] && [ -n "$candidate_fqdn" ] \
             || { echo "::error::candidate identity is incomplete"; exit 1; }
           [ "$candidate_traffic" = "0" ] \
             || { echo "::error::assistant evaluation must run against a zero-traffic candidate"; exit 1; }
-          candidate_active=$(az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+          candidate_active=$(az_retry az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
             --revision "$CANDIDATE_REVISION" --query properties.active -o tsv)
-          [ "$candidate_active" = "false" ] \
-            || { echo "::error::publication must own activation of an inactive candidate"; exit 1; }
-          candidate_owned=true
-          echo "candidate_owned=true" >> "$GITHUB_OUTPUT"
-          az containerapp revision activate -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
-            --revision "$CANDIDATE_REVISION" >/dev/null
+          if [ "$PUBLIC_RETRY" = "true" ]; then
+            if [ "$BOOTSTRAP_MODE" = "true" ]; then
+              [ "$candidate_active" = "true" ] \
+                || { echo "::error::public bootstrap retry requires C active at zero traffic"; exit 1; }
+            else
+              { [ "$candidate_active" = "true" ] || [ "$candidate_active" = "false" ]; } \
+                || { echo "::error::public evaluation retry candidate state is malformed"; exit 1; }
+              # A hard cancellation can skip the original trap after publication. Own only the
+              # standard candidate cleanup; bootstrap C must remain active for promotion.
+              if [ "$candidate_active" = "true" ]; then
+                candidate_owned=true
+                echo "candidate_owned=true" >> "$GITHUB_OUTPUT"
+              fi
+            fi
+            dotnet run --project lex/src/Lex.Ingest/Lex.Ingest.csproj -c Release -- \
+              assistant-eval verify-release \
+              --root evidence \
+              --manifest evidence/assistant-eval.manifest.json \
+              --signature evidence/assistant-eval.manifest.sig \
+              --trust-roots lex/deploy/trusted-artifact-roots.json \
+              --base-url "https://$candidate_fqdn" \
+              --candidate-container-app-resource-id "$app_id" \
+              --candidate-revision "$CANDIDATE_REVISION"
+            retry_assets=(
+              assistant-eval-report.json
+              assistant-cases-v3.json
+              assistant-cases-v3.review.json
+              assistant-cases-v3.review.sig
+              assistant-browser-evidence.json
+              assistant-eval.manifest.json
+              assistant-eval.manifest.sig
+            )
+            if [ "$BOOTSTRAP_MODE" = "true" ]; then
+              legacy_authority=$(jq -er .legacy_authority.revision_name \
+                evidence/bootstrap-equivalence.json)
+              dotnet run --project lex/src/Lex.Ingest/Lex.Ingest.csproj -c Release -- \
+                assistant-eval verify-bootstrap-equivalence \
+                --root evidence \
+                --manifest evidence/bootstrap-equivalence.manifest.json \
+                --signature evidence/bootstrap-equivalence.manifest.sig \
+                --trust-roots lex/deploy/trusted-artifact-roots.json \
+                --equivalence evidence/bootstrap-equivalence.json \
+                --candidate-container-app-resource-id "$app_id" \
+                --legacy-authority-revision "$legacy_authority" \
+                --candidate-revision "$CANDIDATE_REVISION" \
+                --rollback-revision "$BOOTSTRAP_ROLLBACK_REVISION" \
+                --evaluation-release "$EVALUATION_RELEASE" \
+                --canonical-template-digest "$BOOTSTRAP_CANONICAL_TEMPLATE_DIGEST" \
+                --image-digest "$BOOTSTRAP_EXPECTED_IMAGE_DIGEST" \
+                --cases-sha256 "$CASES_SHA"
+              retry_assets+=(
+                bootstrap-equivalence.json
+                bootstrap-equivalence.manifest.json
+                bootstrap-equivalence.manifest.sig
+              )
+            fi
+            expected_assets=$(printf '%s\n' "${retry_assets[@]}" | jq -Rsc \
+              'split("\n") | map(select(length > 0)) | sort')
+            published=$(gh release view "$EVALUATION_RELEASE" \
+              --json isDraft,isPrerelease,tagName,assets)
+            printf '%s' "$published" | jq -e \
+              --arg tag "$EVALUATION_RELEASE" --argjson expected "$expected_assets" '
+                .tagName == $tag and .isDraft == false and .isPrerelease == false
+                and ([.assets[].name] | sort) == $expected' >/dev/null \
+              || { echo "::error::public retry release identity or asset set differs"; exit 1; }
+            retry_readback=$(mktemp -d)
+            for asset in "${retry_assets[@]}"; do
+              curl --fail --show-error --silent --location --retry 5 --retry-all-errors \
+                --retry-delay 2 \
+                "https://github.com/SFHAJJI/lex-ops/releases/download/$EVALUATION_RELEASE/$asset" \
+                -o "$retry_readback/$asset"
+              [ "$(sha256sum "$retry_readback/$asset" | cut -d' ' -f1)" \
+                  = "$(sha256sum "evidence/$asset" | cut -d' ' -f1)" ] \
+                && [ "$(wc -c < "$retry_readback/$asset" | tr -d ' ')" \
+                  = "$(wc -c < "evidence/$asset" | tr -d ' ')" ] \
+                || { echo "::error::public retry read-back changed for $asset"; exit 1; }
+            done
+            echo "candidate_owned=$candidate_owned" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$BOOTSTRAP_MODE" = "true" ]; then
+            [ "$candidate_active" = "true" ] \
+              || { echo "::error::bootstrap C must already be active at zero traffic"; exit 1; }
+            # A failed bootstrap publication abandons this pair by deactivating C under max=1.
+            # A successful publication clears ownership only after immutable public read-back.
+            candidate_owned=true
+            echo "candidate_owned=true" >> "$GITHUB_OUTPUT"
+          else
+            [ "$candidate_active" = "false" ] \
+              || { echo "::error::publication must own activation of an inactive candidate"; exit 1; }
+            candidate_owned=true
+            echo "candidate_owned=true" >> "$GITHUB_OUTPUT"
+            az_retry az containerapp revision activate -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+              --revision "$CANDIDATE_REVISION" >/dev/null
+          fi
           for attempt in {1..20}; do
-            running=$(az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+            running=$(az_retry az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
               --revision "$CANDIDATE_REVISION" --query properties.runningState -o tsv)
               { [ "$running" = "Running" ] || [ "$running" = "RunningAtMaxScale" ]; } && break
             [ "$attempt" = "20" ] \
@@ -215,7 +380,7 @@ jobs:
             --source "report_schema=$REPORT_SCHEMA"
           digest=$(openssl dgst -sha256 -binary evidence/assistant-eval.manifest.json \
             | openssl base64 -A)
-          az keyvault key sign --vault-name "$AZURE_KEY_VAULT" \
+          az_retry az keyvault key sign --vault-name "$AZURE_KEY_VAULT" \
             --name "$AZURE_KEY_NAME" --version "$AZURE_KEY_VERSION" \
             --algorithm ES256 --digest "$digest" -o json \
             | jq -er 'if type == "string" then . else (.signature // .value // .result) end' \
@@ -231,20 +396,287 @@ jobs:
             --candidate-container-app-resource-id "$app_id" \
             --candidate-revision "$CANDIDATE_REVISION"
 
-          gh release upload "$EVALUATION_RELEASE" \
-            evidence/assistant-browser-evidence.json \
-            evidence/assistant-eval.manifest.json \
-            evidence/assistant-eval.manifest.sig \
-            --clobber
+          if [ "$BOOTSTRAP_MODE" = "true" ]; then
+            inactive_limit=$(az_retry az containerapp show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+              --query properties.configuration.maxInactiveRevisions -o tsv)
+            [ "$inactive_limit" = "1" ] \
+              || { echo "::error::bootstrap signing requires maxInactiveRevisions=1"; exit 1; }
+            az_retry az containerapp revision list -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+              --all -o json > evidence/bootstrap-routes.live.json
+            jq -e --arg candidate "$CANDIDATE_REVISION" \
+                --arg rollback "$BOOTSTRAP_ROLLBACK_REVISION" '
+                  length == 3
+                  and ([.[] | select(.properties.active == false) | .name] == [$rollback])
+                  and ([.[] | select(.properties.active == true)] | length) == 2
+                  and (any(.[]; .name == $candidate and .properties.active == true
+                    and (.properties.trafficWeight // 0) == 0))
+                  and (any(.[]; .name == $rollback and .properties.active == false
+                    and (.properties.trafficWeight // 0) == 0))
+                  and ([.[] | select((.properties.trafficWeight // 0) > 0)] | length) == 1
+                  and ([.[] | select((.properties.trafficWeight // 0) == 100
+                    and .properties.active == true
+                    and .name != $candidate and .name != $rollback)] | length) == 1' \
+              evidence/bootstrap-routes.live.json >/dev/null \
+              || { echo "::error::bootstrap signing state is not exact A=100/R-inactive/C-active"; exit 1; }
+            legacy_authority=$(jq -er --arg candidate "$CANDIDATE_REVISION" \
+              --arg rollback "$BOOTSTRAP_ROLLBACK_REVISION" '
+                .[] | select(.name != $candidate and .name != $rollback
+                  and .properties.active == true and (.properties.trafficWeight // 0) == 100)
+                | .name' evidence/bootstrap-routes.live.json)
+            az_retry az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+              --revision "$BOOTSTRAP_ROLLBACK_REVISION" -o json \
+              > evidence/bootstrap-rollback.live.json
+            az_retry az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+              --revision "$CANDIDATE_REVISION" -o json \
+              > evidence/bootstrap-candidate.live.json
+            jq -e --arg revision "$BOOTSTRAP_ROLLBACK_REVISION" '
+                (.id | type == "string")
+                and .name == $revision
+                and (.properties.active | type == "boolean")
+                and .properties.active == false
+                and (.properties.trafficWeight | type == "number")
+                and (.properties.trafficWeight % 1 == 0)
+                and .properties.trafficWeight == 0
+                and (.properties.createdTime | type == "string")
+                and (.properties.template | type == "object")
+                and (.properties.template.containers | type == "array")
+                and (.properties.template.containers | length == 1)
+                and (.properties.template.containers[0].image | type == "string")' \
+              evidence/bootstrap-rollback.live.json >/dev/null \
+              || { echo "::error::bootstrap fallback live state is malformed"; exit 1; }
+            jq -e --arg revision "$CANDIDATE_REVISION" '
+                (.id | type == "string")
+                and .name == $revision
+                and (.properties.active | type == "boolean")
+                and .properties.active == true
+                and (.properties.trafficWeight | type == "number")
+                and (.properties.trafficWeight % 1 == 0)
+                and .properties.trafficWeight == 0
+                and (.properties.createdTime | type == "string")
+                and (.properties.template | type == "object")
+                and (.properties.template.containers | type == "array")
+                and (.properties.template.containers | length == 1)
+                and (.properties.template.containers[0].image | type == "string")' \
+              evidence/bootstrap-candidate.live.json >/dev/null \
+              || { echo "::error::bootstrap candidate live state is malformed"; exit 1; }
+            rollback_id=$(jq -er .id evidence/bootstrap-rollback.live.json)
+            candidate_id=$(jq -er .id evidence/bootstrap-candidate.live.json)
+            legacy_id=$(jq -er --arg legacy "$legacy_authority" \
+              '.[] | select(.name == $legacy) | .id' evidence/bootstrap-routes.live.json)
+            legacy_created=$(jq -er --arg legacy "$legacy_authority" \
+              '.[] | select(.name == $legacy) | .properties.createdTime' \
+              evidence/bootstrap-routes.live.json)
+            [ "${rollback_id,,}" = "${app_id,,}/revisions/${BOOTSTRAP_ROLLBACK_REVISION,,}" ] \
+              && [ "${candidate_id,,}" = "${app_id,,}/revisions/${CANDIDATE_REVISION,,}" ] \
+              || { echo "::error::bootstrap live revision resource id changed"; exit 1; }
+            expected_image="crsoufien3orem.azurecr.io/lex-web@$BOOTSTRAP_EXPECTED_IMAGE_DIGEST"
+            rollback_image=$(jq -er .properties.template.containers[0].image \
+              evidence/bootstrap-rollback.live.json)
+            candidate_image=$(jq -er .properties.template.containers[0].image \
+              evidence/bootstrap-candidate.live.json)
+            [ "$rollback_image" = "$expected_image" ] \
+              && [ "$candidate_image" = "$expected_image" ] \
+              || { echo "::error::bootstrap R/C image is not the expected Lex ACR digest"; exit 1; }
+            rollback_template_digest=$(python3 \
+              lex/scripts/deploy/revision_template_digest.py \
+              < evidence/bootstrap-rollback.live.json)
+            candidate_template_digest=$(python3 \
+              lex/scripts/deploy/revision_template_digest.py \
+              < evidence/bootstrap-candidate.live.json)
+            [ "$rollback_template_digest" = "$BOOTSTRAP_CANONICAL_TEMPLATE_DIGEST" ] \
+              && [ "$candidate_template_digest" = "$BOOTSTRAP_CANONICAL_TEMPLATE_DIGEST" ] \
+              || { echo "::error::bootstrap R/C canonical templates differ"; exit 1; }
+            rollback_code_commit=$(jq -er \
+              '[.properties.template.containers[0].env[]
+                | select(.name == "LEX_CODE_COMMIT") | .value]
+               | if length == 1 then .[0] else error("LEX_CODE_COMMIT is not unique") end' \
+              evidence/bootstrap-rollback.live.json)
+            candidate_code_commit=$(jq -er \
+              '[.properties.template.containers[0].env[]
+                | select(.name == "LEX_CODE_COMMIT") | .value]
+               | if length == 1 then .[0] else error("LEX_CODE_COMMIT is not unique") end' \
+              evidence/bootstrap-candidate.live.json)
+            [ "$rollback_code_commit" = "$CODE_COMMIT" ] \
+              && [ "$candidate_code_commit" = "$CODE_COMMIT" ] \
+              || { echo "::error::bootstrap R/C code commit changed"; exit 1; }
+            rollback_created=$(jq -er .properties.createdTime \
+              evidence/bootstrap-rollback.live.json)
+            candidate_created=$(jq -er .properties.createdTime \
+              evidence/bootstrap-candidate.live.json)
+            python3 - "$legacy_created" "$rollback_created" "$candidate_created" <<'PY'
+          import datetime
+          import sys
+
+          def instant(value):
+              if not value.endswith("Z"):
+                  raise ValueError("createdTime is not explicit UTC")
+              return datetime.datetime.fromisoformat(value[:-1] + "+00:00")
+
+          if not instant(sys.argv[1]) < instant(sys.argv[2]) < instant(sys.argv[3]):
+              raise SystemExit("bootstrap chronology must be exact A < R < C")
+          PY
+            generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            jq -n \
+              --arg schema "lex-first-release-equivalence/1" \
+              --arg generated "$generated_at" \
+              --arg release "$EVALUATION_RELEASE" \
+              --arg app "$app_id" \
+              --arg image "$BOOTSTRAP_EXPECTED_IMAGE_DIGEST" \
+              --arg template "$BOOTSTRAP_CANONICAL_TEMPLATE_DIGEST" \
+              --arg cases "$CASES_SHA" \
+              --arg preparation "legacy-a-active-c-active-r-inactive" \
+              --arg legacy "$legacy_authority" \
+              --arg legacy_id "$legacy_id" \
+              --arg legacy_created "$legacy_created" \
+              --arg rollback "$BOOTSTRAP_ROLLBACK_REVISION" \
+              --arg rollback_id "$rollback_id" \
+              --arg rollback_created "$rollback_created" \
+              --arg candidate "$CANDIDATE_REVISION" \
+              --arg candidate_id "$candidate_id" \
+              --arg candidate_created "$candidate_created" \
+              '{schema:$schema,generated_at:$generated,evaluation_release:$release,
+                container_app_resource_id:$app,image_digest:$image,
+                canonical_template_digest:$template,
+                cases_sha256:$cases,
+                excluded_template_fields:["revisionSuffix"],
+                preparation_state:$preparation,
+                legacy_authority:{revision_name:$legacy,revision_resource_id:$legacy_id,
+                  created_time:$legacy_created,active:true,traffic_weight:100},
+                rollback:{revision_name:$rollback,revision_resource_id:$rollback_id,
+                  created_time:$rollback_created,active:false,traffic_weight:0},
+                candidate:{revision_name:$candidate,revision_resource_id:$candidate_id,
+                  created_time:$candidate_created,active:true,traffic_weight:0}}' \
+              > evidence/bootstrap-equivalence.json
+            equivalence_sha=$(sha256sum evidence/bootstrap-equivalence.json | cut -d' ' -f1)
+            dotnet run --project lex/src/Lex.Ingest/Lex.Ingest.csproj -c Release -- \
+              artifact manifest --root evidence \
+              --file bootstrap-equivalence.json \
+              --manifest evidence/bootstrap-equivalence.manifest.json \
+              --key-id "$ARTIFACT_KEY_ID" --code-commit "$CODE_COMMIT" \
+              --source "candidate_revision=$CANDIDATE_REVISION" \
+              --source "canonical_template_digest=$BOOTSTRAP_CANONICAL_TEMPLATE_DIGEST" \
+              --source "cases_sha256=$CASES_SHA" \
+              --source "equivalence_sha256=$equivalence_sha" \
+              --source "evaluation_release=$EVALUATION_RELEASE" \
+              --source "image_digest=$BOOTSTRAP_EXPECTED_IMAGE_DIGEST" \
+              --source "legacy_authority_revision=$legacy_authority" \
+              --source "preparation_state=legacy-a-active-c-active-r-inactive" \
+              --source "purpose=assistant-evaluation-bootstrap-equivalence" \
+              --source "rollback_revision=$BOOTSTRAP_ROLLBACK_REVISION" \
+              --source "schema=lex-first-release-equivalence/1"
+            equivalence_manifest_digest=$(openssl dgst -sha256 -binary \
+              evidence/bootstrap-equivalence.manifest.json | openssl base64 -A)
+            az_retry az keyvault key sign --vault-name "$AZURE_KEY_VAULT" \
+              --name "$AZURE_KEY_NAME" --version "$AZURE_KEY_VERSION" \
+              --algorithm ES256 --digest "$equivalence_manifest_digest" -o json \
+              | jq -er 'if type == "string" then . else (.signature // .value // .result) end' \
+              > evidence/bootstrap-equivalence.manifest.sig
+            dotnet run --project lex/src/Lex.Ingest/Lex.Ingest.csproj -c Release -- \
+              assistant-eval verify-bootstrap-equivalence \
+              --root evidence \
+              --manifest evidence/bootstrap-equivalence.manifest.json \
+              --signature evidence/bootstrap-equivalence.manifest.sig \
+              --trust-roots lex/deploy/trusted-artifact-roots.json \
+              --equivalence evidence/bootstrap-equivalence.json \
+              --candidate-container-app-resource-id "$app_id" \
+              --legacy-authority-revision "$legacy_authority" \
+              --candidate-revision "$CANDIDATE_REVISION" \
+              --rollback-revision "$BOOTSTRAP_ROLLBACK_REVISION" \
+              --evaluation-release "$EVALUATION_RELEASE" \
+              --canonical-template-digest "$BOOTSTRAP_CANONICAL_TEMPLATE_DIGEST" \
+              --image-digest "$BOOTSTRAP_EXPECTED_IMAGE_DIGEST" \
+              --cases-sha256 "$CASES_SHA"
+          fi
+
+          release_assets=(
+            evidence/assistant-eval-report.json
+            evidence/assistant-cases-v3.json
+            evidence/assistant-cases-v3.review.json
+            evidence/assistant-cases-v3.review.sig
+            evidence/assistant-browser-evidence.json
+            evidence/assistant-eval.manifest.json
+            evidence/assistant-eval.manifest.sig
+          )
+          if [ "$BOOTSTRAP_MODE" = "true" ]; then
+            release_assets+=(
+              evidence/bootstrap-equivalence.json
+              evidence/bootstrap-equivalence.manifest.json
+              evidence/bootstrap-equivalence.manifest.sig
+            )
+          fi
+          gh release upload "$EVALUATION_RELEASE" "${release_assets[@]}" --clobber
+          if [ "$BOOTSTRAP_MODE" = "true" ]; then
+            # Uploads are still confined to the draft. Re-read every live revision immediately
+            # before the irreversible public-release boundary, then verify the signed package
+            # against that fresh snapshot.
+            az_retry az containerapp revision list -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+              --all -o json | jq -S 'sort_by(.name)' > evidence/bootstrap-routes.readback.json
+            jq -S 'sort_by(.name)' evidence/bootstrap-routes.live.json \
+              > evidence/bootstrap-routes.expected.json
+            cmp --silent evidence/bootstrap-routes.expected.json \
+              evidence/bootstrap-routes.readback.json \
+              || { echo "::error::bootstrap A/R/C state changed before publication"; exit 1; }
+            dotnet run --project lex/src/Lex.Ingest/Lex.Ingest.csproj -c Release -- \
+              assistant-eval verify-bootstrap-equivalence \
+              --root evidence \
+              --manifest evidence/bootstrap-equivalence.manifest.json \
+              --signature evidence/bootstrap-equivalence.manifest.sig \
+              --trust-roots lex/deploy/trusted-artifact-roots.json \
+              --equivalence evidence/bootstrap-equivalence.json \
+              --candidate-container-app-resource-id "$app_id" \
+              --legacy-authority-revision "$legacy_authority" \
+              --candidate-revision "$CANDIDATE_REVISION" \
+              --rollback-revision "$BOOTSTRAP_ROLLBACK_REVISION" \
+              --evaluation-release "$EVALUATION_RELEASE" \
+              --canonical-template-digest "$BOOTSTRAP_CANONICAL_TEMPLATE_DIGEST" \
+              --image-digest "$BOOTSTRAP_EXPECTED_IMAGE_DIGEST" \
+              --cases-sha256 "$CASES_SHA"
+          fi
+          release_notes="Signed production release evidence for candidate revision $CANDIDATE_REVISION. Promotion independently revalidates this package against Azure and the live candidate attestation."
+          if [ "$BOOTSTRAP_MODE" = "true" ]; then
+            release_notes="$release_notes Bootstrap fallback $BOOTSTRAP_ROLLBACK_REVISION is a signed canonical-template/image equivalent first-release fallback; it is not independently evaluated."
+            # The publish API may succeed even if the runner is cancelled before its response is
+            # observed. Relinquish cleanup ownership before that ambiguous boundary so public
+            # signed evidence can never be followed by automatic C deactivation and R purging.
+            candidate_owned=false
+            echo "candidate_owned=false" >> "$GITHUB_OUTPUT"
+          fi
           gh release edit "$EVALUATION_RELEASE" --draft=false --latest=false \
             --title "Lex assistant evaluation ${CODE_COMMIT:0:12}" \
-            --notes "Signed production release evidence for candidate revision $CANDIDATE_REVISION. Promotion independently revalidates this package against Azure and the live candidate attestation."
+            --notes "$release_notes"
+          published=$(gh release view "$EVALUATION_RELEASE" \
+            --json isDraft,isPrerelease,tagName,assets)
+          expected_assets=$(printf '%s\n' "${release_assets[@]##*/}" | jq -Rsc \
+            'split("\n") | map(select(length > 0)) | sort')
+          printf '%s' "$published" | jq -e \
+            --arg tag "$EVALUATION_RELEASE" --argjson expected "$expected_assets" '
+              .tagName == $tag and .isDraft == false and .isPrerelease == false
+              and ([.assets[].name] | sort) == $expected' >/dev/null \
+            || { echo "::error::published release identity or asset set differs"; exit 1; }
+          readback_dir=$(mktemp -d)
+          for asset_path in "${release_assets[@]}"; do
+            asset=${asset_path##*/}
+            downloaded="$readback_dir/$asset"
+            curl --fail --show-error --silent --location --retry 5 --retry-all-errors \
+              --retry-delay 2 \
+              "https://github.com/SFHAJJI/lex-ops/releases/download/$EVALUATION_RELEASE/$asset" \
+              -o "$downloaded"
+            [ -f "$downloaded" ] \
+              && [ "$(sha256sum "$downloaded" | cut -d' ' -f1)" \
+                = "$(sha256sum "$asset_path" | cut -d' ' -f1)" ] \
+              && [ "$(wc -c < "$downloaded" | tr -d ' ')" \
+                = "$(wc -c < "$asset_path" | tr -d ' ')" ] \
+              || { echo "::error::published release read-back differs for $asset"; exit 1; }
+          done
 
       - name: Always restore one active quota authority
         if: always() && steps.publish.outputs.candidate_owned == 'true'
         shell: bash
         run: |
           set -euo pipefail
+          . lex/scripts/deploy/az-retry.sh
+          . lex/scripts/deploy/az-reauth.sh
+          az_reauth
           for attempt in 1 2 3 4 5; do
             az containerapp revision deactivate -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
               --revision "$CANDIDATE_REVISION" >/dev/null 2>&1 || true
@@ -255,10 +687,19 @@ jobs:
               && { echo "::error::candidate remains an active quota authority"; exit 1; }
             sleep "$attempt"
           done
-          active_count=$(az containerapp revision list -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+          active_count=$(az containerapp revision list -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" --all \
             --query "[?properties.active==\`true\`] | length(@)" -o tsv)
           [ "$active_count" = "1" ] \
             || { echo "::error::expected exactly one active revision, found $active_count"; exit 1; }
+          if [ "$BOOTSTRAP_MODE" = "true" ]; then
+            az containerapp revision list -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+              --all -o json | jq -e --arg candidate "$CANDIDATE_REVISION" '
+                length == 2
+                and ([.[] | select(.properties.active == false) | .name] == [$candidate])
+                and ([.[] | select(.properties.active == true
+                  and (.properties.trafficWeight // 0) == 100)] | length) == 1' >/dev/null \
+              || { echo "::error::bootstrap abandonment did not retain exact A plus inactive C"; exit 1; }
+          fi
 
       - name: Publication summary
         shell: bash
@@ -272,4 +713,8 @@ jobs:
             echo "- independent review signature: verified"
             echo "- Azure target and model identities: verified"
             echo "- whole-evidence Key Vault signature: verified"
+            if [ "$BOOTSTRAP_MODE" = "true" ]; then
+              echo "- bounded bootstrap state: A active/100, R inactive/0, C active/0"
+              echo "- C must be promoted or explicitly abandoned before signed evidence expires"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
