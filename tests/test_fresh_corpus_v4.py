@@ -1,5 +1,4 @@
 from pathlib import Path
-import re
 import unittest
 
 
@@ -28,6 +27,7 @@ class FreshCorpusV4ContractTests(unittest.TestCase):
         self.assertIn("refs/heads/main", WORKFLOW)
         self.assertIn("grep -Fx \"$LEX_COMMIT\"", WORKFLOW)
         self.assertIn("merge-base --is-ancestor", SCRIPT)
+        self.assertIn("checked-out Lex tree does not match LEX_COMMIT", SCRIPT)
         self.assertIn("validate-append-only-protection", WORKFLOW)
 
     def test_corpus_publication_is_complete_scoped_and_fast_forward_only(self):

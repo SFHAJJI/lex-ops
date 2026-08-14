@@ -9,7 +9,8 @@ mode="${1:-}"
   || { echo "ERROR: LEX_COMMIT must be a full lowercase SHA" >&2; exit 2; }
 
 git -C lex fetch --no-tags origin main
-test "$(git -C lex rev-parse HEAD)" = "$LEX_COMMIT"
+[ "$(git -C lex rev-parse HEAD)" = "$LEX_COMMIT" ] \
+  || { echo "ERROR: checked-out Lex tree does not match LEX_COMMIT" >&2; exit 2; }
 git -C lex merge-base --is-ancestor "$LEX_COMMIT" refs/remotes/origin/main \
   || { echo "ERROR: LEX_COMMIT is not on protected Lex main" >&2; exit 2; }
 
