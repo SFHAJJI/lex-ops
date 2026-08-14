@@ -201,6 +201,59 @@ class V4ReleaseContractTests(unittest.TestCase):
         self.assertNotEqual(0, rejected.returncode)
         self.assertIn("generation", rejected.stderr)
 
+    def test_legacy_articles_generation_is_explicitly_reinitialized_for_v3(self) -> None:
+        repository = self.root / "articles"
+        repository.mkdir()
+        subprocess.run(["git", "init", "-q", str(repository)], check=True)
+        generation = repository / "generation.json"
+        generation.write_text(
+            json.dumps(
+                {
+                    "schema": "lex-articles-generation/1",
+                    "deriver_fingerprint": "legacy",
+                    "corpus_commits": {"lu-legilux": "a" * 40},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            ["git", "-C", str(repository), "add", "generation.json"], check=True
+        )
+
+        migrated = run_contract(
+            "prepare-articles-generation", str(repository), cwd=self.root
+        )
+        self.assertEqual(0, migrated.returncode, migrated.stderr)
+        self.assertEqual("legacy", migrated.stdout.strip())
+        self.assertFalse(generation.exists())
+
+        # The first derivation may create a partial generation/3 locally. The helper must
+        # preserve it so the second publisher can be added, while the outer workflow refuses
+        # publication until both exact entries are present.
+        partial = {
+            "schema": "lex-articles-generation/3",
+            "publishers": {"lu-legilux": {"collection": "lu-legilux"}},
+        }
+        generation.write_text(json.dumps(partial) + "\n", encoding="utf-8")
+        before = generation.read_bytes()
+        current = run_contract(
+            "prepare-articles-generation", str(repository), cwd=self.root
+        )
+        self.assertEqual(0, current.returncode, current.stderr)
+        self.assertEqual("current", current.stdout.strip())
+        self.assertEqual(before, generation.read_bytes())
+
+        generation.write_text(
+            '{"schema":"lex-articles-generation/99"}\n', encoding="utf-8"
+        )
+        rejected = run_contract(
+            "prepare-articles-generation", str(repository), cwd=self.root
+        )
+        self.assertNotEqual(0, rejected.returncode)
+        self.assertIn("unknown schema", rejected.stderr)
+        self.assertTrue(generation.exists())
+
     def test_retry_after_articles_push_reuses_the_exact_tree(self) -> None:
         repository = self.root / "articles"
         repository.mkdir()

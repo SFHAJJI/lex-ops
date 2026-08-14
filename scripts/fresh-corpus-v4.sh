@@ -115,6 +115,7 @@ derive() {
   local representative articles_commit status_commit stamp output queue_core candidate_ticket
   local current_ticket_id candidate_ticket_id eu_entry lu_entry articles_action ticket_action
   articles_base=$(git -C articles rev-parse HEAD)
+  bash "$release_contract" prepare-articles-generation articles
   tree_id=$(git -C lex rev-parse HEAD:src/Lex.Derive)
   declare -A corpus_commits work_counts corpus_repos corpus_dirs source_configurations
 
@@ -154,6 +155,7 @@ derive() {
   jq -e --arg lu "${corpus_commits[lu-legilux]}" \
     --arg eu "${corpus_commits[eu-eurlex]}" '
       .schema == "lex-articles-generation/3"
+      and (.publishers | keys) == ["eu-eurlex", "lu-legilux"]
       and .publishers["lu-legilux"].corpus_commit == $lu
       and .publishers["eu-eurlex"].corpus_commit == $eu
       and (.publishers["lu-legilux"].ingester_code_commit | test("^[0-9a-f]{40}$"))

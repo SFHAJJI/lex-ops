@@ -48,6 +48,18 @@ class FreshCorpusV4ContractTests(unittest.TestCase):
         self.assertEqual(1, SCRIPT.count('"${lex_cli[@]}" derive --publisher'))
         self.assertIn("--work \"$representative\"", SCRIPT)
         self.assertIn("lex-articles-generation/3", SCRIPT)
+        self.assertIn("prepare-articles-generation articles", SCRIPT)
+        self.assertLess(
+            SCRIPT.index("prepare-articles-generation articles"),
+            SCRIPT.index("for publisher in lu-legilux eu-eurlex; do", SCRIPT.index("derive()")),
+        )
+        self.assertIn(
+            '(.publishers | keys) == ["eu-eurlex", "lu-legilux"]', SCRIPT
+        )
+        self.assertLess(
+            SCRIPT.index('(.publishers | keys) == ["eu-eurlex", "lu-legilux"]'),
+            SCRIPT.index("git -C articles add -- generation.json"),
+        )
         self.assertIn("already matches the exact v4 derivation inputs", SCRIPT)
         self.assertIn("using already-published exact articles", SCRIPT)
 

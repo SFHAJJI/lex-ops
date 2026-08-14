@@ -190,6 +190,32 @@ classify_articles_tree() {
   fi
 }
 
+prepare_articles_generation() {
+  local repository="$1" generation schema
+  generation="$repository/generation.json"
+  [ -d "$repository/.git" ] \
+    || fail "articles checkout is not a Git repository"
+  [ -f "$generation" ] && [ ! -L "$generation" ] \
+    || fail "articles generation.json must be a regular tracked file"
+  git -C "$repository" ls-files --error-unmatch generation.json >/dev/null \
+    || fail "articles generation.json must be a regular tracked file"
+  schema=$(jq -er '.schema | select(type == "string")' "$generation") \
+    || fail "articles generation.json has no schema"
+  case "$schema" in
+    lex-articles-generation/1|lex-articles-generation/2)
+      # This is the reviewed one-time v4 migration boundary. DerivationGeneration intentionally
+      # refuses legacy schemas, so remove only the legacy manifest in this disposable checkout;
+      # the two publisher derives below recreate generation/3 from exact corpus evidence.
+      rm -- "$generation"
+      echo legacy
+      ;;
+    lex-articles-generation/3)
+      echo current
+      ;;
+    *) fail "articles generation.json has an unknown schema: $schema" ;;
+  esac
+}
+
 classify_ticket() {
   local current="$1" candidate="$2" schema current_id candidate_id
   validate_ticket "$candidate"
@@ -253,6 +279,10 @@ case "${1:-}" in
   classify-articles-tree)
     [ "$#" -eq 2 ] || fail "usage: $0 classify-articles-tree REPOSITORY"
     classify_articles_tree "$2"
+    ;;
+  prepare-articles-generation)
+    [ "$#" -eq 2 ] || fail "usage: $0 prepare-articles-generation REPOSITORY"
+    prepare_articles_generation "$2"
     ;;
   classify-ticket)
     [ "$#" -eq 3 ] || fail "usage: $0 classify-ticket CURRENT CANDIDATE"
