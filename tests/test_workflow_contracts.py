@@ -70,6 +70,113 @@ class WorkflowContractTests(unittest.TestCase):
                 )
                 self.assertNotEqual(0, completed.returncode)
 
+    def test_evaluation_publisher_retries_transient_candidate_lifecycle_calls(self):
+        workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(encoding="utf-8")
+
+        self.assertIn(". lex/scripts/deploy/az-retry.sh", workflow)
+        self.assertIn(". lex/scripts/deploy/az-reauth.sh", workflow)
+        self.assertIn("az_retry az containerapp revision activate", workflow)
+        self.assertIn("az_reauth", workflow)
+        self.assertIn("expected exactly one active revision", workflow)
+
+    def test_evaluation_publisher_signs_and_verifies_exact_bootstrap_equivalence(self):
+        workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(encoding="utf-8")
+
+        for name in (
+            "bootstrap_rollback_revision",
+            "bootstrap_canonical_template_digest",
+            "bootstrap_expected_image_digest",
+        ):
+            self.assertIn(name, workflow)
+        self.assertIn("bootstrap equivalence inputs must be supplied together", workflow)
+        self.assertIn("group: lex-production", workflow)
+        self.assertIn("crsoufien3orem.azurecr.io/lex-web@", workflow)
+        self.assertIn("lex/scripts/deploy/revision_template_digest.py", workflow)
+        self.assertIn('"lex-first-release-equivalence/1"', workflow)
+        self.assertIn('excluded_template_fields:["revisionSuffix"]', workflow)
+        self.assertIn('preparation_state:$preparation', workflow)
+        self.assertIn('legacy_authority:{revision_name:$legacy', workflow)
+        self.assertIn('created_time:$rollback_created,active:false,traffic_weight:0', workflow)
+        self.assertIn('created_time:$candidate_created,active:true,traffic_weight:0', workflow)
+        self.assertIn("bootstrap-equivalence.json", workflow)
+        self.assertIn("bootstrap-equivalence.manifest.json", workflow)
+        self.assertIn("bootstrap-equivalence.manifest.sig", workflow)
+        self.assertIn("purpose=assistant-evaluation-bootstrap-equivalence", workflow)
+        signing = workflow.index("equivalence_manifest_digest=")
+        verification = workflow.index("assistant-eval verify-bootstrap-equivalence", signing)
+        publication = workflow.index('gh release upload "$EVALUATION_RELEASE"', verification)
+        self.assertLess(signing, verification)
+        self.assertLess(verification, publication)
+        self.assertIn('--rollback-revision "$BOOTSTRAP_ROLLBACK_REVISION"', workflow)
+        self.assertIn('--legacy-authority-revision "$legacy_authority"', workflow)
+        self.assertIn('--canonical-template-digest "$BOOTSTRAP_CANONICAL_TEMPLATE_DIGEST"', workflow)
+        self.assertIn('--image-digest "$BOOTSTRAP_EXPECTED_IMAGE_DIGEST"', workflow)
+        self.assertIn('--cases-sha256 "$CASES_SHA"', workflow)
+        self.assertIn('--source "cases_sha256=$CASES_SHA"', workflow)
+        self.assertIn('cases_sha256:$cases', workflow)
+        self.assertIn("not independently evaluated", workflow)
+        self.assertIn("bootstrap signing state is not exact A=100/R-inactive/C-active", workflow)
+        self.assertIn("bootstrap chronology must be exact A < R < C", workflow)
+        self.assertIn('echo "candidate_owned=false" >> "$GITHUB_OUTPUT"', workflow)
+
+    def test_every_revision_list_uses_complete_azure_inventory(self):
+        workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(
+            encoding="utf-8"
+        ).replace("\\\n", " ")
+        calls = re.findall(
+            r"az(?:_retry)?\s+containerapp\s+revision\s+list\b[^\r\n]*",
+            workflow,
+        )
+        self.assertTrue(calls)
+        self.assertTrue(all("--all" in call for call in calls), calls)
+
+    def test_evaluation_publication_reads_draft_and_public_assets_exactly(self):
+        workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(encoding="utf-8")
+        publication = workflow.index('gh release upload "$EVALUATION_RELEASE"')
+        publish_boundary = workflow.index('gh release edit "$EVALUATION_RELEASE"', publication)
+        final_state = workflow.index(
+            'published=$(gh release view "$EVALUATION_RELEASE"', publish_boundary
+        )
+        readback = workflow.index(
+            'https://github.com/SFHAJJI/lex-ops/releases/download/$EVALUATION_RELEASE/$asset',
+            final_state,
+        )
+        final_live = workflow.index("bootstrap-routes.readback.json", publication)
+        relinquish = workflow.index(
+            'echo "candidate_owned=false" >> "$GITHUB_OUTPUT"', publication
+        )
+
+        self.assertLess(publication, final_live)
+        self.assertLess(final_live, relinquish)
+        self.assertLess(relinquish, publish_boundary)
+        self.assertLess(publish_boundary, final_state)
+        self.assertLess(final_state, readback)
+        self.assertIn(".isDraft == true and .isPrerelease == false", workflow)
+        self.assertIn(".isDraft == false and .isPrerelease == false", workflow)
+        self.assertIn("([.assets[].name] | sort) == $expected", workflow)
+        self.assertIn("--retry-all-errors", workflow)
+        self.assertIn('sha256sum "$downloaded"', workflow)
+        self.assertIn('wc -c < "$downloaded"', workflow)
+        self.assertIn("evaluation release is not an exact retry-safe release", workflow)
+        post_publish = workflow[publish_boundary:]
+        self.assertNotIn('gh release upload "$EVALUATION_RELEASE"', post_publish)
+        self.assertNotIn('gh release download "$EVALUATION_RELEASE"', post_publish)
+
+    def test_evaluation_public_retry_verifies_without_mutating_the_release(self):
+        workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(encoding="utf-8")
+        retry_start = workflow.index('if [ "$PUBLIC_RETRY" = "true" ]')
+        retry_end = workflow.index("bootstrap C must already be active", retry_start)
+        retry = workflow[retry_start:retry_end]
+
+        self.assertIn("assistant-eval verify-release", retry)
+        self.assertIn("public retry release identity or asset set differs", retry)
+        self.assertIn("public retry read-back changed", retry)
+        self.assertIn("candidate_owned=$candidate_owned", retry)
+        self.assertNotIn("gh release upload", retry)
+        self.assertNotIn("gh release edit", retry)
+        self.assertIn('echo "PUBLIC_RETRY=true" >> "$GITHUB_ENV"', workflow)
+        self.assertIn("and ([.assets[].name] | sort) == ($allowed | sort)", workflow)
+
     @staticmethod
     def report():
         return {

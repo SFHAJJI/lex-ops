@@ -61,23 +61,22 @@ jobs:
           git cat-file -e "$QUEUE_COMMIT^{commit}"
           git merge-base --is-ancestor "$QUEUE_COMMIT" refs/remotes/origin/fleet-status \
             || { echo "::error::queue commit is not on the generated fleet-status history"; exit 2; }
-          ticket=$(git show "$QUEUE_COMMIT:status/index-queue.json")
-          printf '%s' "$ticket" | jq -e \
-            --arg pub "$PUBLISHER" \
-            '.schema == "lex-index-build-queue/1"
-             and .mode == "prebuilt"
-             and (.build_code_commit | test("^[0-9a-f]{40}$"))
-             and (.articles_commit | test("^[0-9a-f]{40}$"))
-             and ([.entries[] | select(.collection == $pub)] | length == 1)' >/dev/null
+          ticket_file=$(mktemp)
+          git show "$QUEUE_COMMIT:status/index-queue.json" > "$ticket_file"
+          bash scripts/v4-release-contract.sh validate-ticket "$ticket_file"
+          jq -e --arg pub "$PUBLISHER" \
+            '.mode == "prebuilt"
+             and ([.entries[] | select(.collection == $pub)] | length == 1)' \
+            "$ticket_file" >/dev/null
           repo=$(jq -er --arg pub "$PUBLISHER" \
             '.publishers[] | select(.enabled and .id == $pub) | .corpus_repo' publishers.json)
-          ticket_repo=$(printf '%s' "$ticket" | jq -er --arg pub "$PUBLISHER" \
-            '.entries[] | select(.collection == $pub) | .corpus_repo')
+          ticket_repo=$(jq -er --arg pub "$PUBLISHER" \
+            '.entries[] | select(.collection == $pub) | .corpus_repo' "$ticket_file")
           [ "$repo" = "$ticket_repo" ] \
             || { echo "::error::ticket corpus repository does not match the registry"; exit 2; }
-          echo "build_code_commit=$(printf '%s' "$ticket" | jq -er .build_code_commit)" >> "$GITHUB_OUTPUT"
-          echo "articles_commit=$(printf '%s' "$ticket" | jq -er .articles_commit)" >> "$GITHUB_OUTPUT"
-          echo "corpus_commit=$(printf '%s' "$ticket" | jq -er --arg pub "$PUBLISHER" '.entries[] | select(.collection == $pub) | .corpus_commit')" >> "$GITHUB_OUTPUT"
+          echo "build_code_commit=$(jq -er .build_code_commit "$ticket_file")" >> "$GITHUB_OUTPUT"
+          echo "articles_commit=$(jq -er .articles_commit "$ticket_file")" >> "$GITHUB_OUTPUT"
+          echo "corpus_commit=$(jq -er --arg pub "$PUBLISHER" '.entries[] | select(.collection == $pub) | .corpus_commit' "$ticket_file")" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -112,5 +111,7 @@ jobs:
           AZURE_INDEX_STORAGE_ACCOUNT: ${{ vars.AZURE_INDEX_STORAGE_ACCOUNT }}
           AZURE_KEY_VAULT: ${{ vars.AZURE_KEY_VAULT }}
           AZURE_KEY_NAME: ${{ vars.AZURE_KEY_NAME }}
-          DEPLOY_AFTER_PUBLISH: ${{ vars.DEPLOY_AFTER_PUBLISH }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
         run: bash publish-prebuilt-index.sh
