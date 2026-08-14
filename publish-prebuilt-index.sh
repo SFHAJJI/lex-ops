@@ -16,6 +16,10 @@ set -euo pipefail
 : "${AZURE_INDEX_STORAGE_ACCOUNT:?AZURE_INDEX_STORAGE_ACCOUNT is required}"
 : "${AZURE_KEY_VAULT:?AZURE_KEY_VAULT is required}"
 : "${AZURE_KEY_NAME:?AZURE_KEY_NAME is required}"
+: "${AZURE_CLIENT_ID:?AZURE_CLIENT_ID is required}"
+: "${AZURE_TENANT_ID:?AZURE_TENANT_ID is required}"
+: "${AZURE_SUBSCRIPTION_ID:?AZURE_SUBSCRIPTION_ID is required}"
+: "${GH_TOKEN:?GH_TOKEN is required}"
 
 [[ "$STAGING_PREFIX" =~ ^staging/[a-z0-9-]+/[A-Za-z0-9._/-]+$ ]] \
   || { echo "ERROR: unsafe staging prefix" >&2; exit 2; }
@@ -56,18 +60,266 @@ publication_tool_commit=$(git -C lex rev-parse HEAD)
   || { echo "ERROR: publication tooling does not match the ticketed Lex commit" >&2; exit 2; }
 git -C lex fetch --no-tags origin main
 bash require-ancestor.sh lex "$BUILD_CODE_COMMIT" refs/remotes/origin/main "ticketed Lex commit"
+. lex/scripts/deploy/az-reauth.sh
+. lex/scripts/deploy/az-retry.sh
 
 index="index-$PUBLISHER.db"
 vectors="index-$PUBLISHER.vectors"
 manifest="index-$PUBLISHER.manifest.json"
 signature="index-$PUBLISHER.manifest.sig"
+cleanup_receipt="staging-cleanup-$PUBLISHER.json"
+cleanup_manifest="staging-cleanup-$PUBLISHER.manifest.json"
+cleanup_signature="staging-cleanup-$PUBLISHER.manifest.sig"
+tag="index-$PUBLISHER-$QUEUE_COMMIT"
 stamp=$(date -u +%FT%TZ)
 
-echo "=== download hash-pinned prebuilt artifacts ==="
-for asset in "$index" "$vectors"; do
-  az storage blob download --auth-mode login --only-show-errors \
+cleanup_exact_blob() {
+  local name="$1" expected_etag="$2" exists observed
+  exists=$(az_retry az storage blob exists --auth-mode login --only-show-errors \
     --account-name "$AZURE_INDEX_STORAGE_ACCOUNT" --container-name lex \
-    --name "$STAGING_PREFIX/$asset" --file "$asset" --overwrite true >/dev/null
+    --name "$name" --query exists -o tsv)
+  [ "$exists" = "true" ] || { [ "$exists" = "false" ] && return 0; return 1; }
+  observed=$(az_retry az storage blob show --auth-mode login --only-show-errors \
+    --account-name "$AZURE_INDEX_STORAGE_ACCOUNT" --container-name lex \
+    --name "$name" --query properties.etag -o tsv)
+  [ "$observed" = "$expected_etag" ] \
+    || { echo "ERROR: refusing to delete changed staging blob $name" >&2; return 1; }
+  if ! az_retry az storage blob delete --auth-mode login --only-show-errors \
+      --account-name "$AZURE_INDEX_STORAGE_ACCOUNT" --container-name lex \
+      --name "$name" --if-match "$expected_etag" >/dev/null; then
+    # A transport failure can hide a successful delete. Only the exact absence read-back
+    # converts that ambiguous result to success; a changed or still-present blob fails closed.
+    exists=$(az_retry az storage blob exists --auth-mode login --only-show-errors \
+      --account-name "$AZURE_INDEX_STORAGE_ACCOUNT" --container-name lex \
+      --name "$name" --query exists -o tsv)
+    [ "$exists" = "false" ] || return 1
+  fi
+  exists=$(az_retry az storage blob exists --auth-mode login --only-show-errors \
+    --account-name "$AZURE_INDEX_STORAGE_ACCOUNT" --container-name lex \
+    --name "$name" --query exists -o tsv)
+  [ "$exists" = "false" ] \
+    || { echo "ERROR: staging blob deletion did not converge for $name" >&2; return 1; }
+}
+
+verify_blob_asset() {
+  local prefix="$1" name="$2" expected_sha="$3" expected_size="$4" remote
+  remote=$(az_retry az storage blob show --auth-mode login --only-show-errors \
+    --account-name "$AZURE_INDEX_STORAGE_ACCOUNT" --container-name lex \
+    --name "$prefix/$name" \
+    --query '{sha:metadata.sha256,size:properties.contentLength}' -o json)
+  [ "$(printf '%s' "$remote" | jq -r .sha)" = "$expected_sha" ] \
+    && [ "$(printf '%s' "$remote" | jq -r .size)" = "$expected_size" ] \
+    || { echo "ERROR: immutable Blob release verification failed for $name" >&2; return 1; }
+}
+
+publish_pointer() {
+  local manifest_id="$1" release_prefix="$2" published_at="$3"
+  local expected_exists="$4" expected_etag="$5" expected_sha="$6"
+  local pointer readback current_exists current_etag current_sha
+  local -a condition
+  pointer=$(mktemp)
+  readback=$(mktemp)
+  jq -cS -n --arg pub "$PUBLISHER" --arg manifest "$manifest_id" \
+    --arg prefix "$release_prefix" --arg corpus "$CORPUS_COMMIT" \
+    --arg published "$published_at" \
+    '{schema:"lex-artifact-pointer/1",collection:$pub,manifest_sha256:$manifest,
+      prefix:$prefix,corpus_commit:$corpus,published_at:$published}' > "$pointer"
+  current_exists=$(az_retry az storage blob exists --auth-mode login --only-show-errors \
+    --account-name "$AZURE_INDEX_STORAGE_ACCOUNT" --container-name lex \
+    --name "current/$PUBLISHER.json" --query exists -o tsv)
+  if [ "$current_exists" = "true" ]; then
+    current_etag=$(az_retry az storage blob show --auth-mode login --only-show-errors \
+      --account-name "$AZURE_INDEX_STORAGE_ACCOUNT" --container-name lex \
+      --name "current/$PUBLISHER.json" --query properties.etag -o tsv)
+    az_retry az storage blob download --auth-mode login --only-show-errors --overwrite true \
+      --account-name "$AZURE_INDEX_STORAGE_ACCOUNT" --container-name lex \
+      --name "current/$PUBLISHER.json" --file "$readback" \
+      --if-match "$current_etag" >/dev/null
+    if cmp -s "$pointer" "$readback"; then
+      rm -f "$pointer" "$readback"
+      return 0
+    fi
+    current_sha=$(sha256sum "$readback" | cut -d' ' -f1)
+    [ "$expected_exists" = "true" ] \
+      && [ "$current_etag" = "$expected_etag" ] \
+      && [ "$current_sha" = "$expected_sha" ] \
+      || { echo "ERROR: refusing to replace a changed current artifact pointer" >&2; return 1; }
+    condition=(--if-match "$expected_etag")
+  else
+    [ "$current_exists" = "false" ] && [ "$expected_exists" = "false" ] \
+      || { echo "ERROR: current artifact pointer existence changed" >&2; return 1; }
+    condition=(--if-none-match '*')
+  fi
+  if ! az_retry az storage blob upload --auth-mode login --only-show-errors --overwrite true \
+      --account-name "$AZURE_INDEX_STORAGE_ACCOUNT" --container-name lex \
+      --name "current/$PUBLISHER.json" --file "$pointer" "${condition[@]}" >/dev/null; then
+    echo "pointer update returned ambiguously; requiring exact desired read-back" >&2
+  fi
+  current_etag=$(az_retry az storage blob show --auth-mode login --only-show-errors \
+    --account-name "$AZURE_INDEX_STORAGE_ACCOUNT" --container-name lex \
+    --name "current/$PUBLISHER.json" --query properties.etag -o tsv)
+  az_retry az storage blob download --auth-mode login --only-show-errors --overwrite true \
+    --account-name "$AZURE_INDEX_STORAGE_ACCOUNT" --container-name lex \
+    --name "current/$PUBLISHER.json" --file "$readback" --if-match "$current_etag" >/dev/null
+  cmp -s "$pointer" "$readback" \
+    || { echo "ERROR: current artifact pointer read-back differs" >&2; return 1; }
+  rm -f "$pointer" "$readback"
+}
+
+# A cancellation can occur between the two exact ETag deletes. A finalized public release is an
+# immutable retry marker: verify its dedicated signed cleanup receipt and every core public asset,
+# then finish only the still-present allowlisted blob. This path never rebuilds or mutates a release.
+if public_state=$(gh release view "$tag" --repo "$repo" \
+    --json isDraft,isPrerelease,tagName,assets 2>/dev/null) \
+    && printf '%s' "$public_state" | jq -e --arg tag "$tag" \
+      '.tagName == $tag and .isDraft == false and .isPrerelease == false' >/dev/null; then
+  retry_dir=$(mktemp -d)
+  retry_dir=$(realpath "$retry_dir")
+  temporary_root=$(realpath "${TMPDIR:-/tmp}")
+  case "$retry_dir" in
+    "$temporary_root"/*) ;;
+    *) echo "ERROR: cleanup retry directory is outside the temporary root" >&2; exit 1 ;;
+  esac
+  for asset in "$cleanup_receipt" "$cleanup_manifest" "$cleanup_signature"; do
+    curl --fail --show-error --silent --location --retry 5 --retry-all-errors \
+      "https://github.com/$repo/releases/download/$tag/$asset" -o "$retry_dir/$asset"
+  done
+  dotnet run --project lex/src/Lex.Ingest -c Release -- artifact verify \
+    --root "$retry_dir" --manifest "$retry_dir/$cleanup_manifest" \
+    --signature "$retry_dir/$cleanup_signature" \
+    --trust-roots lex/deploy/trusted-artifact-roots.json
+  jq -e --arg publisher "$PUBLISHER" --arg queue "$QUEUE_COMMIT" \
+      --arg corpus "$CORPUS_COMMIT" --arg code "$BUILD_CODE_COMMIT" \
+      --arg articles "$ARTICLES_COMMIT" --arg prefix "$STAGING_PREFIX" \
+      --arg index "$STAGING_PREFIX/$index" --arg vectors "$STAGING_PREFIX/$vectors" \
+      --arg index_asset "$index" --arg vectors_asset "$vectors" \
+      --arg manifest_asset "$manifest" --arg signature_asset "$signature" \
+      --arg cleanup_receipt "$cleanup_receipt" --arg cleanup_manifest "$cleanup_manifest" \
+      --arg cleanup_signature "$cleanup_signature" \
+      --arg index_sha "$EXPECTED_INDEX_SHA256" \
+      --arg vectors_sha "$EXPECTED_VECTORS_SHA256" --arg tag "$tag" '
+        .schema == "lex-staging-cleanup-receipt/1"
+        and .purpose == "delete-exact-published-prebuilt-staging"
+        and .publisher == $publisher and .queue_commit == $queue
+        and .corpus_commit == $corpus and .build_code_commit == $code
+        and .articles_commit == $articles and .staging_prefix == $prefix
+        and .release_tag == $tag
+        and .staging.index.name == $index and .staging.index.sha256 == $index_sha
+        and .staging.vectors.name == $vectors
+        and .staging.vectors.sha256 == $vectors_sha
+        and (.staging.index.etag | type == "string" and length > 0)
+        and (.staging.vectors.etag | type == "string" and length > 0)
+        and (.index_manifest_sha256 | test("^[0-9a-f]{64}$"))
+        and (.generated_at | type == "string" and fromdateiso8601 > 0)
+        and (.public_assets | type == "array" and length > 0)
+        and ([.public_assets[].name] | unique | length) == (.public_assets | length)
+        and ([.public_assets[] | select(.name == $index_asset and .sha256 == $index_sha)] | length == 1)
+        and ([.public_assets[] | select(.name == $vectors_asset and .sha256 == $vectors_sha)] | length == 1)
+        and (.index_manifest_sha256 as $manifest_sha
+          | ([.public_assets[] | select(.name == $manifest_asset and .sha256 == $manifest_sha)] | length == 1))
+        and ([.public_assets[] | select(.name == $signature_asset)] | length == 1)
+        and ([.public_assets[] | select(.name == $cleanup_receipt
+          or .name == $cleanup_manifest or .name == $cleanup_signature)] | length == 0)
+        and (.previous_pointer | type == "object")
+        and ((.previous_pointer.exists == true
+              and (.previous_pointer.etag | type == "string" and length > 0)
+              and (.previous_pointer.sha256 | test("^[0-9a-f]{64}$")))
+          or (.previous_pointer.exists == false
+              and .previous_pointer.etag == null and .previous_pointer.sha256 == null))
+        and all(.public_assets[];
+          (.name | test("^[A-Za-z0-9._-]+$"))
+          and (.sha256 | test("^[0-9a-f]{64}$"))
+          and (.size | type == "number" and . >= 0))' \
+    "$retry_dir/$cleanup_receipt" >/dev/null \
+    || { echo "ERROR: signed staging cleanup retry receipt is invalid" >&2; exit 2; }
+  expected_retry_assets=$(
+    {
+      jq -r '.public_assets[].name' "$retry_dir/$cleanup_receipt"
+      printf '%s\n' "$cleanup_receipt" "$cleanup_manifest" "$cleanup_signature"
+    } | sort | jq -Rsc 'split("\n") | map(select(length > 0))'
+  )
+  public_state=$(gh release view "$tag" --repo "$repo" \
+    --json isDraft,isPrerelease,tagName,assets)
+  printf '%s' "$public_state" | jq -e --arg tag "$tag" \
+      --argjson expected "$expected_retry_assets" '
+        .tagName == $tag and .isDraft == false and .isPrerelease == false
+        and ([.assets[].name] | sort) == $expected' >/dev/null \
+    || { echo "ERROR: public release retry asset inventory is not exact" >&2; exit 1; }
+  while IFS= read -r item; do
+    name=$(printf '%s' "$item" | jq -r .name)
+    expected_sha=$(printf '%s' "$item" | jq -r .sha256)
+    expected_size=$(printf '%s' "$item" | jq -r .size)
+    curl --fail --show-error --silent --location --retry 5 --retry-all-errors \
+      "https://github.com/$repo/releases/download/$tag/$name" -o "$retry_dir/$name"
+    [ "$(sha256sum "$retry_dir/$name" | cut -d' ' -f1)" = "$expected_sha" ] \
+      && [ "$(wc -c < "$retry_dir/$name" | tr -d ' ')" = "$expected_size" ] \
+      || { echo "ERROR: public release retry read-back differs for $name" >&2; exit 1; }
+  done < <(jq -c '.public_assets[]' "$retry_dir/$cleanup_receipt")
+  manifest_id=$(jq -r .index_manifest_sha256 "$retry_dir/$cleanup_receipt")
+  release_prefix="releases/$PUBLISHER/$manifest_id"
+  while IFS= read -r item; do
+    verify_blob_asset "$release_prefix" \
+      "$(printf '%s' "$item" | jq -r .name)" \
+      "$(printf '%s' "$item" | jq -r .sha256)" \
+      "$(printf '%s' "$item" | jq -r .size)"
+  done < <(jq -c '.public_assets[]' "$retry_dir/$cleanup_receipt")
+  for asset in "$cleanup_receipt" "$cleanup_manifest" "$cleanup_signature"; do
+    verify_blob_asset "$release_prefix" "$asset" \
+      "$(sha256sum "$retry_dir/$asset" | cut -d' ' -f1)" \
+      "$(wc -c < "$retry_dir/$asset" | tr -d ' ')"
+  done
+  publish_pointer "$manifest_id" "$release_prefix" \
+    "$(jq -r .generated_at "$retry_dir/$cleanup_receipt")" \
+    "$(jq -r .previous_pointer.exists "$retry_dir/$cleanup_receipt")" \
+    "$(jq -r '.previous_pointer.etag // ""' "$retry_dir/$cleanup_receipt")" \
+    "$(jq -r '.previous_pointer.sha256 // ""' "$retry_dir/$cleanup_receipt")"
+  cleanup_exact_blob "$STAGING_PREFIX/$index" \
+    "$(jq -r .staging.index.etag "$retry_dir/$cleanup_receipt")"
+  cleanup_exact_blob "$STAGING_PREFIX/$vectors" \
+    "$(jq -r .staging.vectors.etag "$retry_dir/$cleanup_receipt")"
+  rm -r -- "$retry_dir"
+  echo "published_manifest=$manifest_id"
+  exit 0
+fi
+
+echo "=== snapshot current artifact pointer ==="
+previous_pointer_file=$(mktemp)
+previous_pointer_exists=$(az_retry az storage blob exists --auth-mode login --only-show-errors \
+  --account-name "$AZURE_INDEX_STORAGE_ACCOUNT" --container-name lex \
+  --name "current/$PUBLISHER.json" --query exists -o tsv)
+if [ "$previous_pointer_exists" = "true" ]; then
+  previous_pointer_etag=$(az_retry az storage blob show --auth-mode login --only-show-errors \
+    --account-name "$AZURE_INDEX_STORAGE_ACCOUNT" --container-name lex \
+    --name "current/$PUBLISHER.json" --query properties.etag -o tsv)
+  az_retry az storage blob download --auth-mode login --only-show-errors --overwrite true \
+    --account-name "$AZURE_INDEX_STORAGE_ACCOUNT" --container-name lex \
+    --name "current/$PUBLISHER.json" --file "$previous_pointer_file" \
+    --if-match "$previous_pointer_etag" >/dev/null
+  previous_pointer_sha=$(sha256sum "$previous_pointer_file" | cut -d' ' -f1)
+else
+  [ "$previous_pointer_exists" = "false" ] \
+    || { echo "ERROR: current artifact pointer existence is malformed" >&2; exit 1; }
+  previous_pointer_etag=""
+  previous_pointer_sha=""
+fi
+rm -f "$previous_pointer_file"
+
+echo "=== download hash-pinned prebuilt artifacts ==="
+index_etag=$(az_retry az storage blob show --auth-mode login --only-show-errors \
+  --account-name "$AZURE_INDEX_STORAGE_ACCOUNT" --container-name lex \
+  --name "$STAGING_PREFIX/$index" --query properties.etag -o tsv)
+vectors_etag=$(az_retry az storage blob show --auth-mode login --only-show-errors \
+  --account-name "$AZURE_INDEX_STORAGE_ACCOUNT" --container-name lex \
+  --name "$STAGING_PREFIX/$vectors" --query properties.etag -o tsv)
+[ -n "$index_etag" ] && [ -n "$vectors_etag" ] \
+  || { echo "ERROR: staging inputs have no stable ETag" >&2; exit 1; }
+for asset in "$index" "$vectors"; do
+  etag="$index_etag"
+  [ "$asset" = "$index" ] || etag="$vectors_etag"
+  az_retry az storage blob download --auth-mode login --only-show-errors \
+    --account-name "$AZURE_INDEX_STORAGE_ACCOUNT" --container-name lex \
+    --name "$STAGING_PREFIX/$asset" --file "$asset" --overwrite true \
+    --if-match "$etag" >/dev/null
 done
 printf '%s  %s\n%s  %s\n' "$EXPECTED_INDEX_SHA256" "$index" \
   "$EXPECTED_VECTORS_SHA256" "$vectors" | sha256sum -c -
@@ -134,7 +386,7 @@ dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
   --source "publication_tool_commit=$publication_tool_commit" \
   --source "build_origin=hash-pinned-private-staging"
 digest=$(openssl dgst -sha256 -binary "$manifest" | openssl base64 -A)
-az keyvault key sign --vault-name "$AZURE_KEY_VAULT" --name "$AZURE_KEY_NAME" \
+az_retry az keyvault key sign --vault-name "$AZURE_KEY_VAULT" --name "$AZURE_KEY_NAME" \
   --algorithm ES256 --digest "$digest" -o json \
   | jq -er 'if type == "string" then . else (.signature // .value // .result) end' \
   > "$signature"
@@ -166,7 +418,7 @@ dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
     --source "articles_commit=$ARTICLES_COMMIT" --source "queue_commit=$QUEUE_COMMIT" \
     --source "index_manifest_sha256=$manifest_id"
 benchmark_digest=$(openssl dgst -sha256 -binary "$benchmark_manifest" | openssl base64 -A)
-az keyvault key sign --vault-name "$AZURE_KEY_VAULT" --name "$AZURE_KEY_NAME" \
+az_retry az keyvault key sign --vault-name "$AZURE_KEY_VAULT" --name "$AZURE_KEY_NAME" \
     --algorithm ES256 --digest "$benchmark_digest" -o json \
     | jq -er 'if type == "string" then . else (.signature // .value // .result) end' \
     > "$benchmark_signature"
@@ -177,39 +429,162 @@ release_assets+=("$benchmark" "$benchmark_manifest" "$benchmark_signature")
 
 release_assets+=("$manifest" "$signature")
 
+echo "=== create signed exact staging-cleanup receipt ==="
+asset_inventory=$(mktemp)
+for asset in "${release_assets[@]}"; do
+  jq -cn --arg name "$(basename "$asset")" \
+    --arg sha "$(sha256sum "$asset" | cut -d' ' -f1)" \
+    --argjson size "$(wc -c < "$asset" | tr -d ' ')" \
+    '{name:$name,sha256:$sha,size:$size}' >> "$asset_inventory"
+done
+jq -cS -n --arg publisher "$PUBLISHER" --arg queue "$QUEUE_COMMIT" \
+  --arg corpus "$CORPUS_COMMIT" --arg code "$BUILD_CODE_COMMIT" \
+  --arg articles "$ARTICLES_COMMIT" --arg prefix "$STAGING_PREFIX" \
+  --arg index "$STAGING_PREFIX/$index" --arg index_etag "$index_etag" \
+  --arg index_sha "$EXPECTED_INDEX_SHA256" \
+  --arg vectors "$STAGING_PREFIX/$vectors" --arg vectors_etag "$vectors_etag" \
+  --arg vectors_sha "$EXPECTED_VECTORS_SHA256" --arg manifest "$manifest_id" \
+  --arg tag "$tag" --arg generated "$stamp" \
+  --argjson previous_exists "$previous_pointer_exists" \
+  --arg previous_etag "$previous_pointer_etag" --arg previous_sha "$previous_pointer_sha" \
+  --slurpfile assets "$asset_inventory" \
+  '{schema:"lex-staging-cleanup-receipt/1",
+    purpose:"delete-exact-published-prebuilt-staging",generated_at:$generated,
+    publisher:$publisher,queue_commit:$queue,corpus_commit:$corpus,
+    build_code_commit:$code,articles_commit:$articles,staging_prefix:$prefix,
+    release_tag:$tag,index_manifest_sha256:$manifest,
+    staging:{index:{name:$index,etag:$index_etag,sha256:$index_sha},
+      vectors:{name:$vectors,etag:$vectors_etag,sha256:$vectors_sha}},
+    previous_pointer:{exists:$previous_exists,
+      etag:(if $previous_exists then $previous_etag else null end),
+      sha256:(if $previous_exists then $previous_sha else null end)},
+    public_assets:$assets}' > "$cleanup_receipt"
+rm -f "$asset_inventory"
+dotnet run --project lex/src/Lex.Ingest -c Release -- artifact manifest \
+  --root . --file "$cleanup_receipt" --manifest "$cleanup_manifest" \
+  --key-id "$ARTIFACT_KEY_ID" --code-commit "$BUILD_CODE_COMMIT" \
+  --source "purpose=delete-exact-published-prebuilt-staging" \
+  --source "publisher=$PUBLISHER" --source "queue_commit=$QUEUE_COMMIT" \
+  --source "index_manifest_sha256=$manifest_id"
+cleanup_digest=$(openssl dgst -sha256 -binary "$cleanup_manifest" | openssl base64 -A)
+az_retry az keyvault key sign --vault-name "$AZURE_KEY_VAULT" --name "$AZURE_KEY_NAME" \
+  --algorithm ES256 --digest "$cleanup_digest" -o json \
+  | jq -er 'if type == "string" then . else (.signature // .value // .result) end' \
+  > "$cleanup_signature"
+dotnet run --project lex/src/Lex.Ingest -c Release -- artifact verify \
+  --root . --manifest "$cleanup_manifest" --signature "$cleanup_signature" \
+  --trust-roots lex/deploy/trusted-artifact-roots.json
+release_assets+=("$cleanup_receipt" "$cleanup_manifest" "$cleanup_signature")
+
 echo "=== publish immutable Blob release ==="
 release_prefix="releases/$PUBLISHER/$manifest_id"
 for asset in "${release_assets[@]}"; do
   sha=$(sha256sum "$asset" | cut -d' ' -f1)
-  az storage blob upload --auth-mode login --only-show-errors --overwrite false \
+  size=$(wc -c < "$asset" | tr -d ' ')
+  exists=$(az_retry az storage blob exists --auth-mode login --only-show-errors \
     --account-name "$AZURE_INDEX_STORAGE_ACCOUNT" --container-name lex \
-    --name "$release_prefix/$(basename "$asset")" --file "$asset" \
-    --metadata "sha256=$sha" >/dev/null
+    --name "$release_prefix/$(basename "$asset")" --query exists -o tsv)
+  if [ "$exists" = "true" ]; then
+    remote=$(az_retry az storage blob show --auth-mode login --only-show-errors \
+      --account-name "$AZURE_INDEX_STORAGE_ACCOUNT" --container-name lex \
+      --name "$release_prefix/$(basename "$asset")" \
+      --query '{sha:metadata.sha256,size:properties.contentLength}' -o json)
+    [ "$(printf '%s' "$remote" | jq -r .sha)" = "$sha" ] \
+      && [ "$(printf '%s' "$remote" | jq -r .size)" = "$size" ] \
+      || { echo "ERROR: refusing to overwrite changed immutable Blob asset $asset" >&2; exit 1; }
+  else
+    [ "$exists" = "false" ] \
+      || { echo "ERROR: Blob existence read-back is malformed for $asset" >&2; exit 1; }
+    if ! az_retry az storage blob upload --auth-mode login --only-show-errors --overwrite false \
+        --account-name "$AZURE_INDEX_STORAGE_ACCOUNT" --container-name lex \
+        --name "$release_prefix/$(basename "$asset")" --file "$asset" \
+        --metadata "sha256=$sha" >/dev/null; then
+      # A lost response after creation is accepted only when exact immutable metadata reads back.
+      verify_blob_asset "$release_prefix" "$(basename "$asset")" "$sha" "$size"
+    fi
+  fi
 done
-pointer=$(mktemp)
-jq -n --arg pub "$PUBLISHER" --arg manifest "$manifest_id" \
-  --arg prefix "$release_prefix" --arg corpus "$CORPUS_COMMIT" --arg published "$stamp" \
-  '{schema:"lex-artifact-pointer/1",collection:$pub,manifest_sha256:$manifest,
-    prefix:$prefix,corpus_commit:$corpus,published_at:$published}' > "$pointer"
-az storage blob upload --auth-mode login --only-show-errors --overwrite true \
-  --account-name "$AZURE_INDEX_STORAGE_ACCOUNT" --container-name lex \
-  --name "current/$PUBLISHER.json" --file "$pointer" >/dev/null
-rm -f "$pointer"
-
+echo "=== verify immutable Blob release ==="
+for asset in "${release_assets[@]}"; do
+  expected_sha=$(sha256sum "$asset" | cut -d' ' -f1)
+  expected_size=$(wc -c < "$asset" | tr -d ' ')
+  verify_blob_asset "$release_prefix" "$(basename "$asset")" \
+    "$expected_sha" "$expected_size"
+done
 echo "=== publish public GitHub release ==="
-tag="corpus-$(date -u +%F)"
 if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
-  gh release upload "$tag" "${release_assets[@]}" --repo "$repo" --clobber
+  draft_state=$(gh release view "$tag" --repo "$repo" --json isDraft,isPrerelease,tagName)
+  printf '%s' "$draft_state" | jq -e --arg tag "$tag" \
+    '.tagName == $tag and .isDraft == true and .isPrerelease == false' >/dev/null \
+    || { echo "ERROR: refusing to mutate an existing public or prerelease tag" >&2; exit 1; }
 else
-  gh release create "$tag" "${release_assets[@]}" --repo "$repo" \
-    --title "index-$PUBLISHER $(date -u +%F)" \
+  gh release create "$tag" --repo "$repo" --draft \
+    --title "index-$PUBLISHER ${QUEUE_COMMIT:0:12}" \
     --notes "Signed index and whole-release manifest. Verify against the public key pinned by Lex before use. Free to download and use; redistribution of any build reserved (NOTICE layer 2)."
 fi
+gh release upload "$tag" "${release_assets[@]}" --repo "$repo" --clobber
+expected_assets=$(for asset in "${release_assets[@]}"; do basename "$asset"; done \
+  | sort | jq -Rsc \
+  'split("\n") | map(select(length > 0))')
+gh release view "$tag" --repo "$repo" --json isDraft,isPrerelease,assets \
+  | jq -e --argjson expected "$expected_assets" '
+      .isDraft == true and .isPrerelease == false
+      and ([.assets[].name] | sort) == $expected' >/dev/null \
+  || { echo "ERROR: draft release asset inventory is not exact" >&2; exit 1; }
 
-if [ "${DEPLOY_AFTER_PUBLISH:-0}" = "1" ]; then
-  gh api repos/SFHAJJI/lex/dispatches -X POST \
-    -f event_type=verified_artifact_release \
-    -F 'client_payload[promote]=false'
-fi
+draft_release_dir=$(mktemp -d)
+draft_release_dir=$(realpath "$draft_release_dir")
+temporary_root=$(realpath "${TMPDIR:-/tmp}")
+case "$draft_release_dir" in
+  "$temporary_root"/*) ;;
+  *) echo "ERROR: draft release read-back directory is outside the temporary root" >&2; exit 1 ;;
+esac
+gh release download "$tag" --repo "$repo" --dir "$draft_release_dir"
+for asset in "${release_assets[@]}"; do
+  asset_name=$(basename "$asset")
+  downloaded="$draft_release_dir/$asset_name"
+  [ -f "$downloaded" ] \
+    && [ "$(sha256sum "$downloaded" | cut -d' ' -f1)" = "$(sha256sum "$asset" | cut -d' ' -f1)" ] \
+    && [ "$(wc -c < "$downloaded" | tr -d ' ')" = "$(wc -c < "$asset" | tr -d ' ')" ] \
+    || { echo "ERROR: draft release read-back differs for $asset_name" >&2; exit 1; }
+done
+rm -r -- "$draft_release_dir"
+gh release edit "$tag" --repo "$repo" --draft=false >/dev/null
+
+echo "=== verify public GitHub release ==="
+release_state=$(gh release view "$tag" --repo "$repo" \
+  --json isDraft,isPrerelease,tagName,assets)
+printf '%s' "$release_state" | jq -e --arg tag "$tag" \
+  --argjson expected "$expected_assets" '
+    .tagName == $tag and .isDraft == false and .isPrerelease == false
+    and ([.assets[].name] | sort) == $expected' >/dev/null \
+  || { echo "ERROR: GitHub release is not the expected public final release" >&2; exit 1; }
+public_release_dir=$(mktemp -d)
+public_release_dir=$(realpath "$public_release_dir")
+temporary_root=$(realpath "${TMPDIR:-/tmp}")
+case "$public_release_dir" in
+  "$temporary_root"/*) ;;
+  *) echo "ERROR: public release read-back directory is outside the temporary root" >&2; exit 1 ;;
+esac
+for asset in "${release_assets[@]}"; do
+  asset_name=$(basename "$asset")
+  curl --fail --show-error --silent --location --retry 5 --retry-all-errors \
+    "https://github.com/$repo/releases/download/$tag/$asset_name" \
+    -o "$public_release_dir/$asset_name"
+  downloaded="$public_release_dir/$asset_name"
+  [ -f "$downloaded" ] \
+    || { echo "ERROR: GitHub release is missing $asset_name" >&2; exit 1; }
+  [ "$(sha256sum "$downloaded" | cut -d' ' -f1)" = "$(sha256sum "$asset" | cut -d' ' -f1)" ] \
+    && [ "$(wc -c < "$downloaded" | tr -d ' ')" = "$(wc -c < "$asset" | tr -d ' ')" ] \
+    || { echo "ERROR: GitHub release read-back differs for $asset_name" >&2; exit 1; }
+done
+rm -r -- "$public_release_dir"
+
+publish_pointer "$manifest_id" "$release_prefix" "$stamp" \
+  "$previous_pointer_exists" "$previous_pointer_etag" "$previous_pointer_sha"
+
+echo "=== remove verified private staging inputs ==="
+cleanup_exact_blob "$STAGING_PREFIX/$index" "$index_etag"
+cleanup_exact_blob "$STAGING_PREFIX/$vectors" "$vectors_etag"
 
 echo "published_manifest=$manifest_id"
