@@ -664,7 +664,8 @@ printf '[]\n' > "$expected_assets_json"
 jq() {
   case "$1" in
     -r) return 0 ;;
-    -s|-Rsc) printf '[]\n' ;;
+    -s) printf '[]\n' ;;
+    -Rsc) cat >/dev/null; printf '[]\n' ;;
     *) return 1 ;;
   esac
 }
