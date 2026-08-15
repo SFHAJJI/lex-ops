@@ -27,15 +27,47 @@ def normalize_etag(value):
 
 
 def validate_benchmark(arguments):
-    if len(arguments) != 4:
-        fail("usage: validate-benchmark REPORT CODE CORPUS MANIFEST")
+    if len(arguments) != 7:
+        fail(
+            "usage: validate-benchmark REPORT PUBLISHER CODE CORPUS MANIFEST "
+            "INDEX_SIZE VECTOR_SIZE"
+        )
     report = read_json(arguments[0])
+    publisher, code, corpus, manifest = arguments[1:5]
+    try:
+        index_size, vector_size = map(int, arguments[5:7])
+    except ValueError:
+        fail("benchmark artifact sizes must be integers")
+    counts = {
+        "lu-legilux": (37, 29, 8),
+        "eu-eurlex": (163, 118, 45),
+    }
+    if publisher not in counts:
+        fail("benchmark publisher is unsupported")
+    sample_count, tuning_count, holdout_count = counts[publisher]
+    cases_sha = "d952bb259a8a5bd8859056c9440bcc566127dbcc4f908bd1330b97de1b508f77"
     expected = {
+        "schema": "lex-retrieval-benchmark/3",
+        "sample_count": sample_count,
+        "tuning_sample_count": tuning_count,
+        "holdout_sample_count": holdout_count,
+        "review_status": "reviewed",
+        "baseline_schema": "lex-retrieval-baseline/2",
+        "expected_cases_sha256": cases_sha,
+        "actual_cases_sha256": cases_sha,
+        "review_attestation": "repository-review:retrieval-v2-2026-08-09@2026-08-09",
         "activation_gate_passed": True,
         "gate_failures": [],
-        "code_commit": arguments[1],
-        "corpus_commit": arguments[2],
-        "manifest_id": arguments[3],
+        "code_commit": code,
+        "corpus_commit": corpus,
+        "manifest_id": manifest,
+        "model_id": "intfloat/multilingual-e5-small",
+        "model_revision": "614241f622f53c4eeff9890bdc4f31cfecc418b3",
+        "machine": "github-actions-ubuntu-latest",
+        "resource_configuration": "Container Apps Consumption target, 2 GiB configured limit",
+        "memory_limit_bytes": 2147483648,
+        "index_bytes": index_size,
+        "vector_bytes": vector_size,
     }
     if not isinstance(report, dict) or any(
         report.get(key) != value for key, value in expected.items()
@@ -44,6 +76,14 @@ def validate_benchmark(arguments):
 
 
 def validate_staging_snapshot(arguments):
+    validate_staging(arguments, allow_missing=False)
+
+
+def validate_staging_cleanup_snapshot(arguments):
+    validate_staging(arguments, allow_missing=True)
+
+
+def validate_staging(arguments, allow_missing):
     if len(arguments) != 14:
         fail(
             "usage: validate-staging-snapshot SNAPSHOT PUBLISHER PREFIX TICKET "
@@ -75,12 +115,19 @@ def validate_staging_snapshot(arguments):
     index = f"index-{publisher}.db"
     vectors = f"index-{publisher}.vectors"
     expected_names = {f"{prefix}/{index}", f"{prefix}/{vectors}"}
-    if (
-        not isinstance(snapshot, list)
-        or len(snapshot) != 2
-        or {item.get("name") for item in snapshot if isinstance(item, dict)}
-        != expected_names
-    ):
+    actual_names = {
+        item.get("name") for item in snapshot if isinstance(item, dict)
+    } if isinstance(snapshot, list) else set()
+    inventory_is_valid = (
+        isinstance(snapshot, list)
+        and len(actual_names) == len(snapshot)
+        and (
+            actual_names.issubset(expected_names)
+            if allow_missing
+            else actual_names == expected_names
+        )
+    )
+    if not inventory_is_valid:
         fail("private staging inventory is not the exact DB/vector pair")
     common_metadata = {
         "articles_commit": articles,
@@ -152,13 +199,19 @@ def validate_release(arguments):
         != sorted(expected_assets)
     ):
         fail("public GitHub release is not immutable and exact")
-    if tag_ref.get("object") != {"type": "commit", "sha": corpus}:
+    tag_object = tag_ref.get("object", {})
+    if (
+        not isinstance(tag_object, dict)
+        or tag_object.get("type") != "commit"
+        or tag_object.get("sha") != corpus
+    ):
         fail("release tag does not target the ticketed corpus commit")
 
 
 COMMANDS = {
     "validate-benchmark": validate_benchmark,
     "validate-staging-snapshot": validate_staging_snapshot,
+    "validate-staging-cleanup-snapshot": validate_staging_cleanup_snapshot,
     "validate-release": validate_release,
 }
 

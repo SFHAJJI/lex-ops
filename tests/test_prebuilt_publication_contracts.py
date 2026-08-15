@@ -29,14 +29,37 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
 
     def test_benchmark_must_be_an_exact_passing_activation_gate(self):
         report = {
+            "schema": "lex-retrieval-benchmark/3",
+            "sample_count": 37,
+            "tuning_sample_count": 29,
+            "holdout_sample_count": 8,
+            "review_status": "reviewed",
+            "baseline_schema": "lex-retrieval-baseline/2",
+            "expected_cases_sha256": "d952bb259a8a5bd8859056c9440bcc566127dbcc4f908bd1330b97de1b508f77",
+            "actual_cases_sha256": "d952bb259a8a5bd8859056c9440bcc566127dbcc4f908bd1330b97de1b508f77",
+            "review_attestation": "repository-review:retrieval-v2-2026-08-09@2026-08-09",
             "activation_gate_passed": True,
             "gate_failures": [],
             "code_commit": self.code,
             "corpus_commit": self.corpus,
             "manifest_id": self.index_sha,
+            "model_id": "intfloat/multilingual-e5-small",
+            "model_revision": "614241f622f53c4eeff9890bdc4f31cfecc418b3",
+            "machine": "github-actions-ubuntu-latest",
+            "resource_configuration": "Container Apps Consumption target, 2 GiB configured limit",
+            "memory_limit_bytes": 2147483648,
+            "index_bytes": self.index_size,
+            "vector_bytes": self.vectors_size,
         }
         completed = self.run_contract(
-            "validate-benchmark", report, self.code, self.corpus, self.index_sha
+            "validate-benchmark",
+            report,
+            self.publisher,
+            self.code,
+            self.corpus,
+            self.index_sha,
+            str(self.index_size),
+            str(self.vectors_size),
         )
         self.assertEqual(0, completed.returncode, completed.stderr)
 
@@ -56,9 +79,35 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
                 completed = self.run_contract(
                     "validate-benchmark",
                     candidate,
+                    self.publisher,
                     self.code,
                     self.corpus,
                     self.index_sha,
+                    str(self.index_size),
+                    str(self.vectors_size),
+                )
+                self.assertNotEqual(0, completed.returncode)
+        for field, value in (
+            ("schema", "lex-retrieval-benchmark/2"),
+            ("actual_cases_sha256", "0" * 64),
+            ("sample_count", 36),
+            ("holdout_sample_count", 7),
+            ("review_attestation", "unreviewed"),
+            ("model_revision", "unknown"),
+            ("vector_bytes", self.vectors_size + 1),
+        ):
+            candidate = dict(report)
+            candidate[field] = value
+            with self.subTest(field=field):
+                completed = self.run_contract(
+                    "validate-benchmark",
+                    candidate,
+                    self.publisher,
+                    self.code,
+                    self.corpus,
+                    self.index_sha,
+                    str(self.index_size),
+                    str(self.vectors_size),
                 )
                 self.assertNotEqual(0, completed.returncode)
 
@@ -102,6 +151,23 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
             with self.subTest(candidate=candidate):
                 self.assertNotEqual(0, self.validate_staging(candidate).returncode)
 
+    def test_cleanup_retry_accepts_only_an_exact_remaining_subset(self):
+        snapshot = self.staging_snapshot()
+        for remaining in (snapshot, snapshot[:1], snapshot[1:], []):
+            with self.subTest(remaining=remaining):
+                completed = self.validate_staging(
+                    remaining, command="validate-staging-cleanup-snapshot"
+                )
+                self.assertEqual(0, completed.returncode, completed.stderr)
+        unexpected = snapshot[:1]
+        unexpected[0]["name"] += ".bak"
+        self.assertNotEqual(
+            0,
+            self.validate_staging(
+                unexpected, command="validate-staging-cleanup-snapshot"
+            ).returncode,
+        )
+
     def test_public_release_and_tag_must_be_immutable_and_exact(self):
         tag = f"index-{self.publisher}-{self.ticket}"
         expected_assets = ["a.json", "b.sig"]
@@ -113,7 +179,13 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
             "immutable": True,
             "assets": [{"name": name} for name in expected_assets],
         }
-        tag_ref = {"object": {"type": "commit", "sha": self.corpus}}
+        tag_ref = {
+            "object": {
+                "type": "commit",
+                "sha": self.corpus,
+                "url": f"https://api.github.test/commits/{self.corpus}",
+            }
+        }
         completed = self.run_contract(
             "validate-release",
             release,
@@ -256,9 +328,9 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
             },
         ]
 
-    def validate_staging(self, snapshot):
+    def validate_staging(self, snapshot, command="validate-staging-snapshot"):
         return self.run_contract(
-            "validate-staging-snapshot",
+            command,
             snapshot,
             self.publisher,
             f"staging/{self.publisher}/{self.ticket}",
