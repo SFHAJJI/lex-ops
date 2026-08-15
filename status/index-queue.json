@@ -1,9 +1,9 @@
 {
   "schema": "lex-index-build-queue/2",
   "mode": "prebuilt",
-  "build_code_commit": "9339b0a33bbf9e9385366ab030640b15354d8518",
-  "articles_commit": "3253b0fefcd5a9a6c1ec493c346f98e9d31bbc99",
-  "articles_generation_sha256": "761e91be34c5c528c2806cb5eb08dd02358a5ff753faf40f9e64b7ebd90c0aa3",
+  "build_code_commit": "27f0e02cb0da8e0fdf9f8322d3eef3b3ae09c776",
+  "articles_commit": "ac8851147534b9addfa2231c4364cbd785065841",
+  "articles_generation_sha256": "6a2fb2647dea3ba0b3391e40a0612073c626ef0966bd816cdb8b99b57135c8da",
   "entries": [
     {
       "collection": "eu-eurlex",
@@ -11,25 +11,13 @@
       "corpus_commit": "e9c4df0981c855855a1a28218cf086ddeb5bb691",
       "corpus_manifest_sha256": "eb5abe73c30f7d50decc71539e0e39a76ebb3b1da437b69fd9e3ab38c65a4bd0",
       "ingester_code_commit": "744549f4656090f00b5b3008a94589bf726e6ed1",
-      "deriver_code_commit": "9339b0a33bbf9e9385366ab030640b15354d8518",
+      "deriver_code_commit": "27f0e02cb0da8e0fdf9f8322d3eef3b3ae09c776",
       "deriver_tree_id": "69f0bef039a569f897e7ea81cefa6850d65606db",
       "profiles_sha256": "dc2648dad7205e41eef345172b8413322834a36850a80f266e1632f466660f65",
       "source_configuration_kind": "engineering_scope",
       "source_configuration_sha256": "04a490e489c40568ccee5a17de3f6d2988e2ba153d3a98ad72aa529f45e08d72"
-    },
-    {
-      "collection": "lu-legilux",
-      "corpus_repo": "SFHAJJI/lex-corpus-lu-legilux",
-      "corpus_commit": "c087f9153a8cde5429965ffa897db001f3acdf09",
-      "corpus_manifest_sha256": "9b723d5562e7110d525ae8667910cd8b463b8a993b12c7a3f38604baa8cf76fc",
-      "ingester_code_commit": "0a7ad53c36176c2d52473e0182e86e5c918f60b5",
-      "deriver_code_commit": "9339b0a33bbf9e9385366ab030640b15354d8518",
-      "deriver_tree_id": "69f0bef039a569f897e7ea81cefa6850d65606db",
-      "profiles_sha256": "74534202088578b97f7b1e14e8cfa11700f29316cffdcd5ee304c051c764b12e",
-      "source_configuration_kind": "code_only",
-      "source_configuration_sha256": null
     }
   ],
-  "ticket_id": "9cd20323d9847b55734b1b185b0dc90542a93cda8943d383a8d143e0706b21e8",
-  "generated_at": "2026-08-15T07:36:45Z"
+  "ticket_id": "cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c",
+  "generated_at": "2026-08-15T08:33:03Z"
 }
