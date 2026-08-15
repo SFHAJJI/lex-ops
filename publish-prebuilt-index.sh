@@ -5,6 +5,7 @@ set -euo pipefail
 readonly ARTIFACT_KEY_ID=keyvault-lex-v2
 readonly AZURE_KEY_VERSION=29f1df16fbc34bc7af12f47430cc5acc
 readonly ARTIFACT_KEY_FINGERPRINT=155c58524c90c3d7b3c9f5041139c3313d21075139f8e4c948511c505039fb64
+readonly HYBRID_QUARANTINE_GUARD_COMMIT=a76f3712a5f91dd4968a5aa71c61913f9c4f970b
 
 for required in PUBLICATION_PHASE PUBLISHER STAGING_PREFIX QUEUE_COMMIT WORKFLOW_COMMIT \
   EXPECTED_INDEX_SHA256 EXPECTED_INDEX_ETAG EXPECTED_INDEX_SIZE \
@@ -66,6 +67,8 @@ git -C "$lex_root" checkout --detach "$BUILD_CODE_COMMIT"
   || { echo "ERROR: publication tooling differs from the ticketed Lex commit" >&2; exit 2; }
 git -C "$lex_root" fetch --no-tags origin main
 bash require-ancestor.sh "$lex_root" "$BUILD_CODE_COMMIT" refs/remotes/origin/main "ticketed Lex commit"
+bash require-ancestor.sh "$lex_root" "$HYBRID_QUARANTINE_GUARD_COMMIT" refs/remotes/origin/main \
+  "hybrid quarantine runtime guard"
 publication_tool_commit=$(git -C "$lex_root" rev-parse HEAD)
 . "$lex_root/scripts/deploy/az-reauth.sh"
 . "$lex_root/scripts/deploy/az-retry.sh"
@@ -322,18 +325,9 @@ authenticate_previous_pointer() {
   dotnet run --project "$lex_root/src/Lex.Ingest" -c Release -- artifact verify \
     --root "$previous_dir" --manifest "$previous_dir/$cleanup_manifest" \
     --signature "$previous_dir/$cleanup_signature" --trust-roots "$single_trust_roots"
-  jq -e --arg pub "$PUBLISHER" --arg corpus "$corpus" --arg manifest "$manifest_id" \
-    --slurpfile pointer "$pointer" '
-      (.schema == "lex-staging-cleanup-receipt/1" or .schema == "lex-staging-cleanup-receipt/2")
-      and .publisher == $pub and .corpus_commit == $corpus
-      and .index_manifest_sha256 == $manifest
-      and (if $pointer[0].schema == "lex-artifact-pointer/2" then
-        .schema == "lex-staging-cleanup-receipt/2"
-        and .release_repository == $pointer[0].release_repository
-        and .benchmark_manifest_sha256 == $pointer[0].benchmark_manifest_sha256
-        and .semantic_activation == $pointer[0].semantic_activation
-        and .release_tag == $pointer[0].release_tag else true end)
-    ' "$previous_dir/$cleanup_receipt" >/dev/null \
+  python3 "$ops_root/scripts/prebuilt_publication_contract.py" validate-lineage-receipt \
+    "$previous_dir/$cleanup_receipt" "$pointer" "$PUBLISHER" \
+    "$HYBRID_QUARANTINE_GUARD_COMMIT" \
     || { echo "ERROR: signed previous pointer evidence does not authenticate its lineage" >&2; return 1; }
   previous_corpus_commit="$corpus"
 }
@@ -386,7 +380,9 @@ publish_pointer_from_bundle() {
   local -a condition
   desired="$work_root/desired-pointer.json"
   make_desired_pointer "$desired"
-  expected_exists=$(jq -er .previous_pointer.exists "$root/$cleanup_receipt")
+  expected_exists=$(jq -r \
+    'if (.previous_pointer.exists | type) == "boolean" then .previous_pointer.exists else error end' \
+    "$root/$cleanup_receipt")
   expected_etag=$(jq -r '.previous_pointer.etag // ""' "$root/$cleanup_receipt")
   expected_sha=$(jq -r '.previous_pointer.sha256 // ""' "$root/$cleanup_receipt")
   current=$(mktemp)

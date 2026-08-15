@@ -2,7 +2,7 @@
 resolve_sources_and_build_bundle() {
   local corpus_root="$work_root/corpus" articles_root="$work_root/articles-ticket"
   local source_configuration=- model_revision model_sha tokenizer_sha model_base
-  local manifest_id benchmark_rc asset_inventory asset_size
+  local manifest_id benchmark_rc expected_semantic_activation asset_inventory asset_size
   git clone --filter=blob:none "https://x-access-token:${GH_TOKEN}@github.com/${repo}.git" "$corpus_root"
   git -C "$corpus_root" checkout --detach "$CORPUS_COMMIT"
   [ "$(git -C "$corpus_root" rev-parse HEAD)" = "$CORPUS_COMMIT" ]
@@ -84,12 +84,21 @@ resolve_sources_and_build_bundle() {
     --memory-limit-bytes 2147483648
   benchmark_rc=$?
   set -e
-  [ "$benchmark_rc" -eq 0 ] \
-    || { echo "ERROR: semantic quarantine publication is disabled until runtime enforcement is pinned ($benchmark_rc)" >&2; return "$benchmark_rc"; }
+  case "$benchmark_rc" in
+    0) expected_semantic_activation=true ;;
+    5) expected_semantic_activation=false ;;
+    *) echo "ERROR: retrieval benchmark failed without a valid activation decision ($benchmark_rc)" >&2
+       return "$benchmark_rc" ;;
+  esac
   python3 "$ops_root/scripts/prebuilt_publication_contract.py" validate-benchmark \
     "$work_root/$benchmark" "$PUBLISHER" "$publication_tool_commit" "$CORPUS_COMMIT" \
-    "$manifest_id" "$EXPECTED_INDEX_SIZE" "$EXPECTED_VECTORS_SIZE"
-  semantic_activation=$(jq -er .activation_gate_passed "$work_root/$benchmark")
+    "$manifest_id" "$EXPECTED_INDEX_SIZE" "$EXPECTED_VECTORS_SIZE" \
+    "$expected_semantic_activation"
+  semantic_activation=$(jq -r \
+    'if (.activation_gate_passed | type) == "boolean" then .activation_gate_passed else error end' \
+    "$work_root/$benchmark")
+  [ "$semantic_activation" = "$expected_semantic_activation" ] \
+    || { echo "ERROR: benchmark process result and report activation differ" >&2; return 1; }
 
   (
     cd "$work_root"
@@ -98,6 +107,7 @@ resolve_sources_and_build_bundle() {
       --key-id "$ARTIFACT_KEY_ID" --code-commit "$publication_tool_commit" \
       --source "collection=$PUBLISHER" --source "corpus_commit=$CORPUS_COMMIT" \
       --source "queue_ticket_id=$ticket_id" --source "index_manifest_sha256=$manifest_id" \
+      --source "runtime_guard_commit=$HYBRID_QUARANTINE_GUARD_COMMIT" \
       --source "semantic_activation=$semantic_activation"
   )
   sign_manifest "$work_root/$benchmark_manifest" "$work_root/$benchmark_signature"
@@ -125,17 +135,17 @@ resolve_sources_and_build_bundle() {
     --arg vectors "$STAGING_PREFIX/$vectors" --arg vectors_etag "$EXPECTED_VECTORS_ETAG" \
     --arg vectors_sha "$EXPECTED_VECTORS_SHA256" --argjson vectors_size "$EXPECTED_VECTORS_SIZE" \
     --arg manifest "$manifest_id" --arg benchmark_manifest "$(sha256_file "$work_root/$benchmark_manifest")" \
-    --arg repository "$repo" \
+    --arg repository "$repo" --arg guard "$HYBRID_QUARANTINE_GUARD_COMMIT" \
     --argjson semantic "$semantic_activation" --arg tag "$tag" --arg generated "$stamp" \
     --argjson previous_exists "$previous_pointer_exists" --arg previous_etag "$previous_pointer_etag" \
     --arg previous_sha "$previous_pointer_sha" --slurpfile assets "$asset_inventory" '
-      {schema:"lex-staging-cleanup-receipt/2",purpose:"delete-exact-published-prebuilt-staging",
+      {schema:"lex-staging-cleanup-receipt/3",purpose:"delete-exact-published-prebuilt-staging",
        generated_at:$generated,publisher:$publisher,queue_ticket_id:$ticket,queue_commit:$queue,
        workflow_commit:$workflow,run_id:$run,corpus_commit:$corpus,build_code_commit:$code,
        articles_commit:$articles,staging_prefix:$prefix,release_tag:$tag,
        release_repository:$repository,
        index_manifest_sha256:$manifest,benchmark_manifest_sha256:$benchmark_manifest,
-       semantic_activation:$semantic,
+       runtime_guard_commit:$guard,semantic_activation:$semantic,
        staging:{index:{name:$index,etag:$index_etag,sha256:$index_sha,size:$index_size},
          vectors:{name:$vectors,etag:$vectors_etag,sha256:$vectors_sha,size:$vectors_size}},
        previous_pointer:{exists:$previous_exists,
@@ -152,6 +162,7 @@ resolve_sources_and_build_bundle() {
       --source "release_repository=$repo" \
       --source "workflow_commit=$WORKFLOW_COMMIT" --source "run_id=$GITHUB_RUN_ID" \
       --source "index_manifest_sha256=$manifest_id" \
+      --source "runtime_guard_commit=$HYBRID_QUARANTINE_GUARD_COMMIT" \
       --source "semantic_activation=$semantic_activation"
   )
   sign_manifest "$work_root/$cleanup_manifest" "$work_root/$cleanup_signature"

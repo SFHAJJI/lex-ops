@@ -237,7 +237,8 @@ class FleetStatusTests(unittest.TestCase):
         self.assertIn("refs/remotes/origin/fleet-status", workflow)
         self.assertIn("refs/remotes/origin/fleet-status", publisher)
         self.assertIn("git fetch --no-tags origin", publisher)
-        self.assertEqual(4, publisher.count("bash require-ancestor.sh"))
+        self.assertEqual(5, publisher.count("bash require-ancestor.sh"))
+        self.assertIn("hybrid quarantine runtime guard", publisher)
 
 
 if __name__ == "__main__":

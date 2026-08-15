@@ -40,8 +40,9 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
     vectors_etag = "0xDEF456"
     index_size = 1234
     vectors_size = 5678
+    runtime_guard = "a76f3712a5f91dd4968a5aa71c61913f9c4f970b"
 
-    def test_benchmark_must_be_an_exact_passing_activation_gate(self):
+    def test_benchmark_must_be_an_exact_activation_decision(self):
         report = {
             "schema": "lex-retrieval-benchmark/3",
             "sample_count": 37,
@@ -74,12 +75,28 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
             self.index_sha,
             str(self.index_size),
             str(self.vectors_size),
+            "true",
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+
+        quarantined = dict(report)
+        quarantined["activation_gate_passed"] = False
+        quarantined["gate_failures"] = ["holdout warm p95 exceeds 250 ms"]
+        completed = self.run_contract(
+            "validate-benchmark",
+            quarantined,
+            self.publisher,
+            self.code,
+            self.corpus,
+            self.index_sha,
+            str(self.index_size),
+            str(self.vectors_size),
+            "false",
         )
         self.assertEqual(0, completed.returncode, completed.stderr)
 
         failing_reports = []
         for field, value in (
-            ("activation_gate_passed", False),
             ("gate_failures", ["recall below threshold"]),
             ("code_commit", "0" * 40),
             ("corpus_commit", "0" * 40),
@@ -99,6 +116,7 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
                     self.index_sha,
                     str(self.index_size),
                     str(self.vectors_size),
+                    "true",
                 )
                 self.assertNotEqual(0, completed.returncode)
         for field, value in (
@@ -122,6 +140,43 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
                     self.index_sha,
                     str(self.index_size),
                     str(self.vectors_size),
+                    "true",
+                )
+                self.assertNotEqual(0, completed.returncode)
+
+        for failures in ([], [""], [1], "holdout warm p95 exceeds 250 ms"):
+            candidate = dict(quarantined)
+            candidate["gate_failures"] = failures
+            with self.subTest(quarantine_failures=failures):
+                completed = self.run_contract(
+                    "validate-benchmark",
+                    candidate,
+                    self.publisher,
+                    self.code,
+                    self.corpus,
+                    self.index_sha,
+                    str(self.index_size),
+                    str(self.vectors_size),
+                    "false",
+                )
+                self.assertNotEqual(0, completed.returncode)
+
+        for report_value, expected_activation in (
+            (report, "false"),
+            (quarantined, "true"),
+            (quarantined, "maybe"),
+        ):
+            with self.subTest(expected_activation=expected_activation):
+                completed = self.run_contract(
+                    "validate-benchmark",
+                    report_value,
+                    self.publisher,
+                    self.code,
+                    self.corpus,
+                    self.index_sha,
+                    str(self.index_size),
+                    str(self.vectors_size),
+                    expected_activation,
                 )
                 self.assertNotEqual(0, completed.returncode)
 
@@ -181,6 +236,64 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
                 unexpected, command="validate-staging-cleanup-snapshot"
             ).returncode,
         )
+
+    def test_lineage_receipts_preserve_closed_schema_versions(self):
+        pointer_v2, receipt_v2 = self.lineage_evidence("2")
+        completed = self.run_contract(
+            "validate-lineage-receipt",
+            receipt_v2,
+            pointer_v2,
+            self.publisher,
+            self.runtime_guard,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+
+        pointer_v3, receipt_v3 = self.lineage_evidence("3")
+        completed = self.run_contract(
+            "validate-lineage-receipt",
+            receipt_v3,
+            pointer_v3,
+            self.publisher,
+            self.runtime_guard,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+
+        pointer_v1, receipt_v1 = self.lineage_evidence("1")
+        completed = self.run_contract(
+            "validate-lineage-receipt",
+            receipt_v1,
+            pointer_v1,
+            self.publisher,
+            self.runtime_guard,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+
+        malformed = []
+        missing_guard = json.loads(json.dumps(receipt_v3))
+        missing_guard.pop("runtime_guard_commit")
+        malformed.append((pointer_v3, missing_guard))
+        wrong_guard = json.loads(json.dumps(receipt_v3))
+        wrong_guard["runtime_guard_commit"] = "0" * 40
+        malformed.append((pointer_v3, wrong_guard))
+        guard_smuggled_into_v2 = json.loads(json.dumps(receipt_v2))
+        guard_smuggled_into_v2["runtime_guard_commit"] = self.runtime_guard
+        malformed.append((pointer_v2, guard_smuggled_into_v2))
+        mislabeled_v2 = json.loads(json.dumps(receipt_v2))
+        mislabeled_v2["schema"] = "lex-staging-cleanup-receipt/3"
+        malformed.append((pointer_v3, mislabeled_v2))
+        mismatched_semantic = json.loads(json.dumps(receipt_v3))
+        mismatched_semantic["semantic_activation"] = True
+        malformed.append((pointer_v3, mismatched_semantic))
+        for pointer, receipt in malformed:
+            with self.subTest(receipt=receipt):
+                completed = self.run_contract(
+                    "validate-lineage-receipt",
+                    receipt,
+                    pointer,
+                    self.publisher,
+                    self.runtime_guard,
+                )
+                self.assertNotEqual(0, completed.returncode)
 
     def test_public_release_and_tag_must_be_immutable_and_exact(self):
         tag = f"index-{self.publisher}-{self.ticket}"
@@ -347,10 +460,27 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
         self.assertIn('--version "$AZURE_KEY_VERSION"', script)
         self.assertIn('--trust-roots "$single_trust_roots"', script)
 
-        self.assertNotIn('"$benchmark_rc" -eq 5', script)
+        self.assertIn(
+            "HYBRID_QUARANTINE_GUARD_COMMIT="
+            "a76f3712a5f91dd4968a5aa71c61913f9c4f970b",
+            script,
+        )
+        self.assertIn(
+            '"$HYBRID_QUARANTINE_GUARD_COMMIT" refs/remotes/origin/main',
+            script,
+        )
+        self.assertIn("5) expected_semantic_activation=false", script)
+        self.assertIn('expected_semantic_activation=false', script)
         self.assertIn("validate-benchmark", script)
+        self.assertIn('--source "runtime_guard_commit=$HYBRID_QUARANTINE_GUARD_COMMIT"', script)
+        self.assertIn('runtime_guard_commit:$guard', script)
+        self.assertIn('Semantic activation: $semantic_activation', script)
+        self.assertNotIn("jq -er .semantic_activation", script)
+        self.assertNotIn("jq -er .previous_pointer.exists", script)
         self.assertIn('--source "index_sha256=$EXPECTED_INDEX_SHA256"', script)
         self.assertIn('--source "vectors_sha256=$EXPECTED_VECTORS_SHA256"', script)
+        self.assertIn('schema:"lex-staging-cleanup-receipt/3"', script)
+        self.assertIn("validate-lineage-receipt", script)
 
         self.assertIn('--target "$CORPUS_COMMIT"', script)
         self.assertIn("immutable-releases", script)
@@ -361,7 +491,9 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
         self.assertIn('release_tag:$tag', script)
         self.assertIn('release_repository:$repository', script)
         self.assertIn('receipt_manifest_sha256:$receipt', script)
-        self.assertIn('.release_tag == $pointer[0].release_tag', script)
+        self.assertIn(
+            'pointer.get("release_tag") != receipt.get("release_tag")', contract
+        )
         self.assertIn(
             'receipt_manifest_id=$(sha256_file "$previous_dir/$cleanup_manifest")',
             script,
@@ -409,6 +541,86 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
                 "metadata": {**common, "sha256": self.vectors_sha},
             },
         ]
+
+    def lineage_evidence(self, version):
+        generated = "2026-08-15T00:00:00Z"
+        prefix = f"staging/{self.publisher}/{self.ticket}"
+        tag = f"index-{self.publisher}-{self.ticket}"
+        assets = [
+            {"name": f"index-{self.publisher}.db", "sha256": self.index_sha, "size": self.index_size},
+            {"name": f"index-{self.publisher}.vectors", "sha256": self.vectors_sha, "size": self.vectors_size},
+        ]
+        previous = {"exists": False, "etag": None, "sha256": None}
+        if version == "1":
+            pointer = {
+                "schema": "lex-artifact-pointer/1",
+                "collection": self.publisher,
+                "corpus_commit": self.corpus,
+                "manifest_sha256": self.index_sha,
+                "prefix": f"releases/{self.publisher}/{self.index_sha}",
+                "published_at": generated,
+            }
+            receipt = {
+                "schema": "lex-staging-cleanup-receipt/1",
+                "purpose": "delete-exact-published-prebuilt-staging",
+                "generated_at": generated,
+                "publisher": self.publisher,
+                "queue_ticket_id": self.ticket,
+                "corpus_commit": self.corpus,
+                "build_code_commit": self.code,
+                "articles_commit": self.articles,
+                "staging_prefix": prefix,
+                "release_tag": tag,
+                "index_manifest_sha256": self.index_sha,
+                "staging": {
+                    "index": {"name": f"{prefix}/index-{self.publisher}.db", "etag": self.index_etag, "sha256": self.index_sha},
+                    "vectors": {"name": f"{prefix}/index-{self.publisher}.vectors", "etag": self.vectors_etag, "sha256": self.vectors_sha},
+                },
+                "previous_pointer": previous,
+                "public_assets": assets,
+            }
+            return pointer, receipt
+
+        pointer = {
+            "schema": "lex-artifact-pointer/2",
+            "collection": self.publisher,
+            "manifest_sha256": self.index_sha,
+            "benchmark_manifest_sha256": self.vectors_sha,
+            "semantic_activation": False,
+            "receipt_manifest_sha256": "3" * 64,
+            "release_tag": tag,
+            "release_repository": f"SFHAJJI/lex-corpus-{self.publisher}",
+            "corpus_commit": self.corpus,
+            "published_at": generated,
+        }
+        receipt = {
+            "schema": f"lex-staging-cleanup-receipt/{version}",
+            "purpose": "delete-exact-published-prebuilt-staging",
+            "generated_at": generated,
+            "publisher": self.publisher,
+            "queue_ticket_id": self.ticket,
+            "queue_commit": self.queue,
+            "workflow_commit": self.code,
+            "run_id": "123456",
+            "corpus_commit": self.corpus,
+            "build_code_commit": self.code,
+            "articles_commit": self.articles,
+            "staging_prefix": prefix,
+            "release_tag": tag,
+            "release_repository": f"SFHAJJI/lex-corpus-{self.publisher}",
+            "index_manifest_sha256": self.index_sha,
+            "benchmark_manifest_sha256": self.vectors_sha,
+            "semantic_activation": False,
+            "staging": {
+                "index": {"name": f"{prefix}/index-{self.publisher}.db", "etag": self.index_etag, "sha256": self.index_sha, "size": self.index_size},
+                "vectors": {"name": f"{prefix}/index-{self.publisher}.vectors", "etag": self.vectors_etag, "sha256": self.vectors_sha, "size": self.vectors_size},
+            },
+            "previous_pointer": previous,
+            "public_assets": assets,
+        }
+        if version == "3":
+            receipt["runtime_guard_commit"] = self.runtime_guard
+        return pointer, receipt
 
     def validate_staging(self, snapshot, command="validate-staging-snapshot"):
         return self.run_contract(

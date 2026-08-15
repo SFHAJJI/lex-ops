@@ -3,7 +3,14 @@
 
 import json
 from pathlib import Path
+import re
 import sys
+
+
+COMMIT = re.compile(r"^[0-9a-f]{40}$")
+DIGEST = re.compile(r"^[0-9a-f]{64}$")
+ETAG = re.compile(r"^0x[0-9A-F]+$")
+TICKET = re.compile(r"^[0-9a-f]{64}$")
 
 
 def fail(message):
@@ -27,13 +34,16 @@ def normalize_etag(value):
 
 
 def validate_benchmark(arguments):
-    if len(arguments) != 7:
+    if len(arguments) != 8:
         fail(
             "usage: validate-benchmark REPORT PUBLISHER CODE CORPUS MANIFEST "
-            "INDEX_SIZE VECTOR_SIZE"
+            "INDEX_SIZE VECTOR_SIZE EXPECTED_ACTIVATION"
         )
     report = read_json(arguments[0])
     publisher, code, corpus, manifest = arguments[1:5]
+    expected_activation = arguments[7]
+    if expected_activation not in {"true", "false"}:
+        fail("expected benchmark activation must be true or false")
     try:
         index_size, vector_size = map(int, arguments[5:7])
     except ValueError:
@@ -56,8 +66,6 @@ def validate_benchmark(arguments):
         "expected_cases_sha256": cases_sha,
         "actual_cases_sha256": cases_sha,
         "review_attestation": "repository-review:retrieval-v2-2026-08-09@2026-08-09",
-        "activation_gate_passed": True,
-        "gate_failures": [],
         "code_commit": code,
         "corpus_commit": corpus,
         "manifest_id": manifest,
@@ -72,7 +80,20 @@ def validate_benchmark(arguments):
     if not isinstance(report, dict) or any(
         report.get(key) != value for key, value in expected.items()
     ):
-        fail("retrieval benchmark did not pass the exact activation gate")
+        fail("retrieval benchmark identity or frozen baseline differs")
+    activation = report.get("activation_gate_passed")
+    failures = report.get("gate_failures")
+    if activation is not (expected_activation == "true"):
+        fail("retrieval benchmark activation differs from its process result")
+    if activation:
+        if failures != []:
+            fail("activated retrieval benchmark must have no gate failures")
+    elif (
+        not isinstance(failures, list)
+        or not failures
+        or any(not isinstance(item, str) or not item.strip() for item in failures)
+    ):
+        fail("quarantined retrieval benchmark must have typed gate failures")
 
 
 def validate_staging_snapshot(arguments):
@@ -81,6 +102,195 @@ def validate_staging_snapshot(arguments):
 
 def validate_staging_cleanup_snapshot(arguments):
     validate_staging(arguments, allow_missing=True)
+
+
+def validate_lineage_receipt(arguments):
+    if len(arguments) != 4:
+        fail("usage: validate-lineage-receipt RECEIPT POINTER PUBLISHER GUARD")
+    receipt = read_json(arguments[0])
+    pointer = read_json(arguments[1])
+    publisher, guard = arguments[2:4]
+    if publisher not in {"lu-legilux", "eu-eurlex"} or not COMMIT.fullmatch(guard):
+        fail("lineage publisher or runtime guard is invalid")
+    if not isinstance(receipt, dict) or not isinstance(pointer, dict):
+        fail("lineage receipt and pointer must be objects")
+
+    pointer_v1_keys = {
+        "collection", "corpus_commit", "manifest_sha256", "prefix",
+        "published_at", "schema",
+    }
+    pointer_v2_keys = {
+        "benchmark_manifest_sha256", "collection", "corpus_commit",
+        "manifest_sha256", "published_at", "receipt_manifest_sha256",
+        "release_repository", "release_tag", "schema", "semantic_activation",
+    }
+    pointer_schema = pointer.get("schema")
+    if pointer_schema == "lex-artifact-pointer/1":
+        if set(pointer) != pointer_v1_keys:
+            fail("legacy lineage pointer keys are not exact")
+    elif pointer_schema == "lex-artifact-pointer/2":
+        if set(pointer) != pointer_v2_keys:
+            fail("GitHub lineage pointer keys are not exact")
+    else:
+        fail("lineage pointer schema is unsupported")
+    if (
+        pointer.get("collection") != publisher
+        or not isinstance(pointer.get("corpus_commit"), str)
+        or not COMMIT.fullmatch(pointer["corpus_commit"])
+        or not isinstance(pointer.get("manifest_sha256"), str)
+        or not DIGEST.fullmatch(pointer["manifest_sha256"])
+        or not isinstance(pointer.get("published_at"), str)
+        or not pointer["published_at"]
+    ):
+        fail("lineage pointer identity is invalid")
+
+    v1_keys = {
+        "articles_commit", "build_code_commit", "corpus_commit", "generated_at",
+        "index_manifest_sha256", "previous_pointer", "public_assets", "publisher",
+        "purpose", "queue_ticket_id", "release_tag", "schema", "staging",
+        "staging_prefix",
+    }
+    v2_keys = {
+        "articles_commit", "benchmark_manifest_sha256", "build_code_commit",
+        "corpus_commit", "generated_at", "index_manifest_sha256", "previous_pointer",
+        "public_assets", "publisher", "purpose", "queue_commit", "queue_ticket_id",
+        "release_repository", "release_tag", "run_id", "schema",
+        "semantic_activation", "staging", "staging_prefix", "workflow_commit",
+    }
+    receipt_schema = receipt.get("schema")
+    if receipt_schema == "lex-staging-cleanup-receipt/1":
+        if set(receipt) != v1_keys or pointer_schema != "lex-artifact-pointer/1":
+            fail("legacy cleanup receipt shape or pointer pairing is invalid")
+        has_sizes = False
+    elif receipt_schema == "lex-staging-cleanup-receipt/2":
+        if set(receipt) != v2_keys or pointer_schema != "lex-artifact-pointer/2":
+            fail("cleanup receipt v2 shape or pointer pairing is invalid")
+        has_sizes = True
+    elif receipt_schema == "lex-staging-cleanup-receipt/3":
+        if (
+            set(receipt) != v2_keys | {"runtime_guard_commit"}
+            or pointer_schema != "lex-artifact-pointer/2"
+            or receipt.get("runtime_guard_commit") != guard
+        ):
+            fail("cleanup receipt v3 guard, shape or pointer pairing is invalid")
+        has_sizes = True
+    else:
+        fail("cleanup receipt schema is unsupported")
+
+    ticket = receipt.get("queue_ticket_id")
+    prefix = f"staging/{publisher}/{ticket}"
+    if (
+        receipt.get("purpose") != "delete-exact-published-prebuilt-staging"
+        or receipt.get("publisher") != publisher
+        or not isinstance(ticket, str)
+        or not TICKET.fullmatch(ticket)
+        or receipt.get("staging_prefix") != prefix
+        or receipt.get("release_tag") != f"index-{publisher}-{ticket}"
+        or receipt.get("corpus_commit") != pointer["corpus_commit"]
+        or receipt.get("index_manifest_sha256") != pointer["manifest_sha256"]
+        or receipt.get("generated_at") != pointer["published_at"]
+        or not isinstance(receipt.get("build_code_commit"), str)
+        or not COMMIT.fullmatch(receipt["build_code_commit"])
+        or not isinstance(receipt.get("articles_commit"), str)
+        or not COMMIT.fullmatch(receipt["articles_commit"])
+    ):
+        fail("cleanup receipt does not bind the pointer identity")
+
+    if receipt_schema == "lex-staging-cleanup-receipt/1":
+        if pointer.get("prefix") != f"releases/{publisher}/{pointer['manifest_sha256']}":
+            fail("legacy pointer release prefix is invalid")
+    elif (
+        pointer.get("release_repository") != f"SFHAJJI/lex-corpus-{publisher}"
+        or pointer.get("release_tag") != receipt.get("release_tag")
+        or receipt.get("release_repository") != pointer.get("release_repository")
+        or receipt.get("benchmark_manifest_sha256")
+        != pointer.get("benchmark_manifest_sha256")
+        or not isinstance(pointer.get("semantic_activation"), bool)
+        or receipt.get("semantic_activation") != pointer.get("semantic_activation")
+        or not isinstance(pointer.get("receipt_manifest_sha256"), str)
+        or not DIGEST.fullmatch(pointer["receipt_manifest_sha256"])
+        or not isinstance(receipt.get("queue_commit"), str)
+        or not COMMIT.fullmatch(receipt["queue_commit"])
+        or not isinstance(receipt.get("workflow_commit"), str)
+        or not COMMIT.fullmatch(receipt["workflow_commit"])
+        or not isinstance(receipt.get("run_id"), str)
+        or not receipt["run_id"]
+        or not isinstance(receipt.get("benchmark_manifest_sha256"), str)
+        or not DIGEST.fullmatch(receipt["benchmark_manifest_sha256"])
+        or not isinstance(receipt.get("semantic_activation"), bool)
+    ):
+        fail("GitHub cleanup receipt does not bind the pointer identity")
+
+    previous = receipt.get("previous_pointer")
+    if not isinstance(previous, dict) or set(previous) != {"etag", "exists", "sha256"}:
+        fail("cleanup receipt previous pointer is not exact")
+    if previous.get("exists") is True:
+        valid_etag = isinstance(previous.get("etag"), str) and (
+            bool(previous["etag"]) if not has_sizes else bool(ETAG.fullmatch(previous["etag"]))
+        )
+        if (
+            not valid_etag
+            or not isinstance(previous.get("sha256"), str)
+            or not DIGEST.fullmatch(previous["sha256"])
+        ):
+            fail("cleanup receipt previous pointer snapshot is invalid")
+    elif (
+        previous.get("exists") is not False
+        or previous.get("etag") is not None
+        or previous.get("sha256") is not None
+    ):
+        fail("cleanup receipt absent previous pointer is invalid")
+
+    staging = receipt.get("staging")
+    if not isinstance(staging, dict) or set(staging) != {"index", "vectors"}:
+        fail("cleanup receipt staging pair is not exact")
+    for kind, suffix in (
+        ("index", f"index-{publisher}.db"),
+        ("vectors", f"index-{publisher}.vectors"),
+    ):
+        item = staging.get(kind)
+        keys = {"etag", "name", "sha256"} | ({"size"} if has_sizes else set())
+        if (
+            not isinstance(item, dict)
+            or set(item) != keys
+            or item.get("name") != f"{prefix}/{suffix}"
+            or not isinstance(item.get("etag"), str)
+            or (has_sizes and not ETAG.fullmatch(item["etag"]))
+            or (not has_sizes and not item["etag"])
+            or not isinstance(item.get("sha256"), str)
+            or not DIGEST.fullmatch(item["sha256"])
+            or (
+                has_sizes
+                and (
+                    not isinstance(item.get("size"), int)
+                    or isinstance(item["size"], bool)
+                    or item["size"] <= 0
+                )
+            )
+        ):
+            fail("cleanup receipt staging item is invalid")
+
+    assets = receipt.get("public_assets")
+    if not isinstance(assets, list) or not assets:
+        fail("cleanup receipt public asset inventory is absent")
+    names = []
+    for asset in assets:
+        if (
+            not isinstance(asset, dict)
+            or set(asset) != {"name", "sha256", "size"}
+            or not isinstance(asset.get("name"), str)
+            or not re.fullmatch(r"[A-Za-z0-9._-]+", asset["name"])
+            or not isinstance(asset.get("sha256"), str)
+            or not DIGEST.fullmatch(asset["sha256"])
+            or not isinstance(asset.get("size"), int)
+            or isinstance(asset["size"], bool)
+            or asset["size"] < 0
+            or (has_sizes and asset["size"] >= 2147483648)
+        ):
+            fail("cleanup receipt public asset inventory is invalid")
+        names.append(asset["name"])
+    if len(names) != len(set(names)):
+        fail("cleanup receipt public asset names are duplicated")
 
 
 def validate_staging(arguments, allow_missing):
@@ -248,6 +458,7 @@ def validate_immutable_release_setting(arguments):
 
 COMMANDS = {
     "validate-benchmark": validate_benchmark,
+    "validate-lineage-receipt": validate_lineage_receipt,
     "validate-staging-snapshot": validate_staging_snapshot,
     "validate-staging-cleanup-snapshot": validate_staging_cleanup_snapshot,
     "validate-release": validate_release,

@@ -15,7 +15,7 @@ verify_receipt_header() {
     --arg workflow "$WORKFLOW_COMMIT" --arg run "$GITHUB_RUN_ID" --arg corpus "$CORPUS_COMMIT" \
     --arg code "$BUILD_CODE_COMMIT" --arg articles "$ARTICLES_COMMIT" \
     --arg prefix "$STAGING_PREFIX" --arg tag "$tag" --arg generated "$stamp" \
-    --arg repository "$repo" \
+    --arg repository "$repo" --arg guard "$HYBRID_QUARANTINE_GUARD_COMMIT" \
     --arg index "$STAGING_PREFIX/$index" \
     --arg index_etag "$EXPECTED_INDEX_ETAG" --arg index_sha "$EXPECTED_INDEX_SHA256" \
     --argjson index_size "$EXPECTED_INDEX_SIZE" --arg vectors "$STAGING_PREFIX/$vectors" \
@@ -24,14 +24,15 @@ verify_receipt_header() {
       (keys | sort) == ["articles_commit","benchmark_manifest_sha256","build_code_commit",
         "corpus_commit","generated_at","index_manifest_sha256","previous_pointer",
         "public_assets","publisher","purpose","queue_commit","queue_ticket_id","release_repository","release_tag",
-        "run_id","schema","semantic_activation","staging","staging_prefix","workflow_commit"]
-      and .schema == "lex-staging-cleanup-receipt/2"
+        "run_id","runtime_guard_commit","schema","semantic_activation","staging","staging_prefix","workflow_commit"]
+      and .schema == "lex-staging-cleanup-receipt/3"
       and .purpose == "delete-exact-published-prebuilt-staging"
       and .generated_at == $generated
       and .publisher == $publisher and .queue_ticket_id == $ticket and .queue_commit == $queue
       and .workflow_commit == $workflow and .run_id == $run and .corpus_commit == $corpus
       and .build_code_commit == $code and .articles_commit == $articles
       and .staging_prefix == $prefix and .release_tag == $tag and .release_repository == $repository
+      and .runtime_guard_commit == $guard
       and (.index_manifest_sha256 | test("^[0-9a-f]{64}$"))
       and (.benchmark_manifest_sha256 | test("^[0-9a-f]{64}$"))
       and (.semantic_activation | type == "boolean")
@@ -53,10 +54,18 @@ verify_receipt_header() {
       and ([.public_assets[].name] | sort) == $canonical_assets
     ' "$receipt" >/dev/null || { echo "ERROR: signed cleanup receipt identity is not exact" >&2; return 1; }
   manifest_id=$(jq -er .index_manifest_sha256 "$receipt") || return 1
-  semantic_activation=$(jq -er .semantic_activation "$receipt") || return 1
+  semantic_activation=$(jq -r \
+    'if (.semantic_activation | type) == "boolean" then .semantic_activation else error end' \
+    "$receipt") || return 1
+  release_notes="Signed index, benchmark activation evidence, and whole-release manifest.
+
+Semantic activation: $semantic_activation
+Runtime quarantine guard: $HYBRID_QUARANTINE_GUARD_COMMIT"
   benchmark_manifest_id=$(jq -er .benchmark_manifest_sha256 "$receipt") || return 1
   receipt_manifest_id=$(sha256_file "$receipt_manifest") || return 1
-  previous_pointer_exists=$(jq -er .previous_pointer.exists "$receipt") || return 1
+  previous_pointer_exists=$(jq -r \
+    'if (.previous_pointer.exists | type) == "boolean" then .previous_pointer.exists else error end' \
+    "$receipt") || return 1
   previous_pointer_etag=$(jq -r '.previous_pointer.etag // ""' "$receipt") || return 1
   previous_pointer_sha=$(jq -r '.previous_pointer.sha256 // ""' "$receipt") || return 1
   expected_assets_json="$root/expected-release-assets.json"
@@ -69,18 +78,20 @@ verify_receipt_header() {
   jq -e --arg id "$ARTIFACT_KEY_ID" --arg workflow "$WORKFLOW_COMMIT" \
     --arg run "$GITHUB_RUN_ID" --arg manifest "$manifest_id" --arg code "$BUILD_CODE_COMMIT" \
     --arg receipt "$cleanup_receipt" --arg publisher "$PUBLISHER" --arg ticket "$ticket_id" \
-    --arg repository "$repo" \
+    --arg repository "$repo" --arg guard "$HYBRID_QUARANTINE_GUARD_COMMIT" \
     --arg receipt_sha "$(sha256_file "$receipt")" --argjson semantic "$semantic_activation" '
       .key_id == $id and .code_commit == $code
       and (.files | length == 1) and .files[0].path == $receipt
       and .files[0].sha256 == $receipt_sha
       and (.sources | keys | sort) == ["index_manifest_sha256","publisher","purpose",
-        "queue_ticket_id","release_repository","run_id","semantic_activation","workflow_commit"]
+        "queue_ticket_id","release_repository","run_id","runtime_guard_commit",
+        "semantic_activation","workflow_commit"]
       and .sources.purpose == "delete-exact-published-prebuilt-staging"
       and .sources.publisher == $publisher and .sources.queue_ticket_id == $ticket
       and .sources.release_repository == $repository
       and .sources.workflow_commit == $workflow and .sources.run_id == $run
       and .sources.index_manifest_sha256 == $manifest
+      and .sources.runtime_guard_commit == $guard
       and .sources.semantic_activation == ($semantic | tostring)
     ' "$receipt_manifest" >/dev/null \
     || { echo "ERROR: cleanup signature manifest does not bind the transaction" >&2; return 1; }
@@ -131,21 +142,24 @@ verify_complete_bundle() {
   jq -e --arg id "$ARTIFACT_KEY_ID" --arg manifest "$manifest_id" \
     --arg report "$benchmark" --arg report_sha "$(sha256_file "$root/$benchmark")" \
     --arg pub "$PUBLISHER" --arg corpus "$CORPUS_COMMIT" --arg ticket "$ticket_id" \
-    --arg code "$publication_tool_commit" \
+    --arg code "$publication_tool_commit" --arg guard "$HYBRID_QUARANTINE_GUARD_COMMIT" \
     --argjson semantic "$semantic_activation" '
       .key_id == $id and .code_commit == $code
       and (.files | length == 1) and .files[0].path == $report and .files[0].sha256 == $report_sha
       and (.sources | keys | sort) == ["collection","corpus_commit","index_manifest_sha256",
-        "queue_ticket_id","semantic_activation"]
+        "queue_ticket_id","runtime_guard_commit","semantic_activation"]
       and .sources.collection == $pub and .sources.corpus_commit == $corpus
       and .sources.queue_ticket_id == $ticket and .sources.index_manifest_sha256 == $manifest
+      and .sources.runtime_guard_commit == $guard
       and .sources.semantic_activation == ($semantic | tostring)
     ' "$root/$benchmark_manifest" >/dev/null \
     || { echo "ERROR: benchmark manifest does not bind semantic activation" >&2; return 1; }
   python3 "$ops_root/scripts/prebuilt_publication_contract.py" validate-benchmark \
     "$root/$benchmark" "$PUBLISHER" "$publication_tool_commit" "$CORPUS_COMMIT" \
-    "$manifest_id" "$EXPECTED_INDEX_SIZE" "$EXPECTED_VECTORS_SIZE" || return 1
-  [ "$(jq -er .activation_gate_passed "$root/$benchmark")" = "$semantic_activation" ] \
+    "$manifest_id" "$EXPECTED_INDEX_SIZE" "$EXPECTED_VECTORS_SIZE" \
+    "$semantic_activation" || return 1
+  [ "$(jq -r 'if (.activation_gate_passed | type) == "boolean" then .activation_gate_passed else error end' \
+      "$root/$benchmark")" = "$semantic_activation" ] \
     || { echo "ERROR: receipt semantic activation differs from the signed benchmark" >&2; return 1; }
 }
 
@@ -173,8 +187,9 @@ download_github_bundle() {
   verify_receipt_header "$root" || return 1
   release_json="$root/release.json"
   gh_api "repos/$repo/releases/tags/$tag" > "$release_json" || return 1
-  jq -e --slurpfile expected "$expected_assets_json" \
-    '([.assets[].name] | sort) == ($expected[0] | sort)' "$release_json" >/dev/null \
+  jq -e --arg notes "$release_notes" --slurpfile expected "$expected_assets_json" \
+    '.body == $notes and ([.assets[].name] | sort) == ($expected[0] | sort)' \
+    "$release_json" >/dev/null \
     || { echo "ERROR: GitHub release asset inventory is not exact" >&2; return 1; }
   while IFS= read -r asset; do
     [ -f "$root/$asset" ] && continue
@@ -209,9 +224,10 @@ download_github_bundle() {
       gh release verify-asset "$tag" "$root/$asset" --repo "$repo" >/dev/null || return 1
     done < <(jq -r '.[]' "$expected_assets_json")
   else
-    jq -e --arg tag "$tag" --arg corpus "$CORPUS_COMMIT" --slurpfile expected "$exact_assets_json" '
+    jq -e --arg tag "$tag" --arg corpus "$CORPUS_COMMIT" --arg notes "$release_notes" \
+      --slurpfile expected "$exact_assets_json" '
       .draft == true and .prerelease == false and .tag_name == $tag
-      and .target_commitish == $corpus and .immutable == false
+      and .target_commitish == $corpus and .immutable == false and .body == $notes
       and ([.assets[] | {name,sha256:(.digest | sub("^sha256:"; "")),size}] | sort_by(.name))
         == ($expected[0] | sort_by(.name))
     ' "$release_json" >/dev/null \
@@ -233,22 +249,25 @@ prepare_exact_draft() {
   local root="$1" state release_json
   require_github_immutable_releases
   if state=$(gh_api "repos/$repo/releases/tags/$tag" 2>/dev/null); then
-    printf '%s' "$state" | jq -e --arg tag "$tag" --arg corpus "$CORPUS_COMMIT" '
+    printf '%s' "$state" | jq -e --arg tag "$tag" --arg corpus "$CORPUS_COMMIT" \
+      --arg notes "$release_notes" '
       .draft == true and .prerelease == false and .tag_name == $tag
-      and .target_commitish == $corpus and .immutable == false
+      and .target_commitish == $corpus and .immutable == false and .body == $notes
     ' >/dev/null || { echo "ERROR: refusing to mutate an existing non-draft release" >&2; return 1; }
   else
     gh release create "$tag" --repo "$repo" --draft --target "$CORPUS_COMMIT" \
       --title "index-$PUBLISHER ${ticket_id:0:12}" \
-      --notes "Signed index, benchmark activation evidence, and whole-release manifest."
+      --notes "$release_notes"
   fi
   validate_tag_target "$work_root/draft-tag.json"
   mapfile -t release_uploads < <(jq -r --arg root "$root/" '.[] | $root + .' "$expected_assets_json")
   gh release upload "$tag" "${release_uploads[@]}" --repo "$repo" --clobber
   release_json="$work_root/draft-release.json"
   gh_api "repos/$repo/releases/tags/$tag" > "$release_json"
-  jq -e --slurpfile expected "$expected_assets_json" --arg corpus "$CORPUS_COMMIT" '
+  jq -e --slurpfile expected "$expected_assets_json" --arg corpus "$CORPUS_COMMIT" \
+    --arg notes "$release_notes" '
       .draft == true and .prerelease == false and .target_commitish == $corpus
+      and .body == $notes
       and ([.assets[].name] | sort) == ($expected[0] | sort)
     ' "$release_json" >/dev/null || { echo "ERROR: exact draft publication failed" >&2; return 1; }
   download_github_bundle draft

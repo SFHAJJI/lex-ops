@@ -31,11 +31,16 @@ is the sole canonical published artifact:
 - after publication it verifies the immutable flag, exact tag target, exact API asset SHA-256/size,
   full downloaded bytes, the pinned Key Vault signatures, and GitHub's release and per-asset
   attestations; and
+- a valid signed failing benchmark may publish only as `semantic_activation=false` after the exact
+  protected runtime quarantine guard is present; malformed, missing or mismatched benchmark
+  evidence remains fatal; and
 - only an independent postflight may delete the exact ETag-bound private staging pair.
 
 `stlexindexes/lex` remains private staging and mutable coordination/discovery storage. Its
 `current/<publisher>.json` value is compare-and-swapped for operator discovery, but Lex deployment
 does not consume it as trust or anti-rollback state; deployment pins exact GitHub tags.
+The closed cleanup receipt advances to schema `/3` to bind the pinned runtime quarantine guard;
+lineage validation keeps the historical `/1` and `/2` shapes strict instead of redefining them.
 
 This follows GitHub's documented immutable-release draft-then-publish flow and attestation model:
 <https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases>.

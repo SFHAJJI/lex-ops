@@ -127,8 +127,14 @@ build ticket. The OIDC runner re-downloads and checks the bytes, verifies that t
 the ticket's exact collection, corpus manifest, derived generation, Lex build commit and content
 digest, resolves the pinned model and publisher-bound source scope, creates the whole-artifact
 manifest, signs it with Key Vault, runs the public benchmark,
-    and only then publishes and attests the immutable GitHub release and updates the discovery pointer. Staging is never a
-runtime source, and unsigned, mislabelled or hash-mismatched artifacts cannot be promoted.
+and only then publishes and attests the immutable GitHub release and updates the discovery pointer.
+A benchmark exit of 0 publishes `semantic_activation=true`. Exit 5 is accepted only when the
+exact signed report says `activation_gate_passed=false` with typed gate failures and protected Lex
+`main` contains the pinned runtime quarantine guard; the legal DB remains usable, but the vector
+companion is signed as quarantined. The benchmark manifest, cleanup receipt and release notes bind
+that decision. Every other exit, missing evidence or identity mismatch blocks publication. Staging
+is never a runtime source, and unsigned, mislabelled or hash-mismatched artifacts cannot be
+promoted.
 
 The normal Fleet run remains the default for routine acquisition and derivation. Index construction
 always follows the prebuilt path because the measured build exceeds the hosted-runner window. Do not
