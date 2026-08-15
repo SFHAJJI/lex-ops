@@ -166,17 +166,154 @@ verify_complete_bundle() {
 validate_tag_target() {
   local output="$1"
   gh_api "repos/$repo/git/ref/tags/$tag" > "$output" || return 1
-  jq -e --arg corpus "$CORPUS_COMMIT" \
-    '.object.type == "commit" and .object.sha == $corpus' "$output" >/dev/null \
+  jq -e --arg ref "refs/tags/$tag" --arg corpus "$CORPUS_COMMIT" \
+    '.ref == $ref and .object.type == "commit" and .object.sha == $corpus' "$output" >/dev/null \
     || { echo "ERROR: release tag does not target the ticketed corpus commit" >&2; return 1; }
 }
 
+fetch_release_snapshot() {
+  local output="$1"
+  [[ "$release_id" =~ ^[1-9][0-9]*$ ]] || return 1
+  gh_api "repos/$repo/releases/$release_id" > "$output"
+}
+
+discover_exact_draft() {
+  local locator="$work_root/draft-locator.json" snapshot="$work_root/draft-discovered.json"
+  local owner="${repo%%/*}" name="${repo#*/}" query
+  [ -n "$owner" ] && [ -n "$name" ] && [ "$repo" = "$owner/$name" ] && [[ "$name" != */* ]] \
+    || return 2
+  query='query($owner:String!,$name:String!,$tag:String!){repository(owner:$owner,name:$name){nameWithOwner release(tagName:$tag){databaseId tagName}}}'
+  gh_api graphql -f query="$query" -f owner="$owner" -f name="$name" -f tag="$tag" \
+    > "$locator" 2>/dev/null || return 2
+  jq -e --arg repo "$repo" '
+      ((.errors // []) == []) and .data.repository.nameWithOwner == $repo
+      and (.data.repository | has("release"))
+      and (.data.repository.release == null or (.data.repository.release | type) == "object")
+    ' "$locator" >/dev/null || return 2
+  if jq -e '.data.repository.release == null' "$locator" >/dev/null; then
+    return 1
+  fi
+  release_id=$(jq -er --arg tag "$tag" '
+      .data.repository.release | select(.tagName == $tag) | .databaseId
+      | select(type == "number" and . > 0 and . == floor)
+    ' "$locator") || return 2
+  fetch_release_snapshot "$snapshot" || return 2
+  jq -e --argjson id "$release_id" --arg tag "$tag" --arg corpus "$CORPUS_COMMIT" \
+    --arg name "index-$PUBLISHER ${ticket_id:0:12}" --arg notes "$release_notes" '
+      .id == $id and .tag_name == $tag and .target_commitish == $corpus
+      and .name == $name and .body == $notes and .published_at == null
+      and .draft == true and .prerelease == false
+      and .immutable == false and (.assets | type) == "array"
+      and ([.assets[].id] | length) == ([.assets[].id] | unique | length)
+      and ([.assets[].name] | length) == ([.assets[].name] | unique | length)
+    ' "$snapshot" >/dev/null || return 2
+}
+
+pin_public_release() {
+  local locator="$work_root/public-locator.json" snapshot="$work_root/public-pinned.json"
+  gh_api "repos/$repo/releases/tags/$tag" > "$locator" 2>/dev/null || return 1
+  release_id=$(jq -er --arg tag "$tag" '
+      select(.tag_name == $tag) | .id
+      | select(type == "number" and . > 0 and . == floor)
+    ' "$locator") || return 1
+  fetch_release_snapshot "$snapshot" || return 1
+  jq -e --argjson id "$release_id" --arg tag "$tag" --arg corpus "$CORPUS_COMMIT" '
+      .id == $id and .tag_name == $tag and .target_commitish == $corpus
+      and .draft == false and .prerelease == false and .immutable == true
+    ' "$snapshot" >/dev/null
+}
+
+ensure_exact_tag() {
+  local output="$work_root/draft-tag.json" endpoint="repos/$repo/git/ref/tags/$tag"
+  if gh_api "$endpoint" > "$output" 2>/dev/null; then
+    validate_tag_target "$output"
+    return
+  fi
+  gh_api --method POST "repos/$repo/git/refs" \
+    -f "ref=refs/tags/$tag" -f "sha=$CORPUS_COMMIT" >/dev/null 2>&1 || true
+  gh_api "$endpoint" > "$output" || return 1
+  validate_tag_target "$output"
+}
+
+write_asset_inventory() {
+  local root="$1" output="$2" item="$output.items" asset
+  : > "$item"
+  while IFS= read -r asset; do
+    [ -f "$root/$asset" ] || return 1
+    jq -cn --arg name "$asset" --arg sha "$(sha256_file "$root/$asset")" \
+      --argjson size "$(size_file "$root/$asset")" '{name:$name,sha256:$sha,size:$size}' \
+      >> "$item" || return 1
+  done < <(jq -r '.[]' "$expected_assets_json")
+  jq -s 'sort_by(.name)' "$item" > "$output" || return 1
+  rm -f "$item"
+}
+
+validate_draft_inventory() {
+  local snapshot="$1" expected="$2" complete="$3"
+  jq -e --argjson id "$release_id" --arg tag "$tag" --arg corpus "$CORPUS_COMMIT" \
+    --arg name "index-$PUBLISHER ${ticket_id:0:12}" --arg notes "$release_notes" \
+    --argjson complete "$complete" --slurpfile expected "$expected" '
+      ($expected[0] | map({key:.name,value:{digest:("sha256:" + .sha256),size:.size}})
+        | from_entries) as $wanted
+      | .id == $id and .tag_name == $tag and .target_commitish == $corpus
+      and .name == $name and .body == $notes and .published_at == null
+      and .draft == true and .prerelease == false and .immutable == false
+      and ([.assets[].id] | length) == ([.assets[].id] | unique | length)
+      and ([.assets[].name] | length) == ([.assets[].name] | unique | length)
+      and all(.assets[]; .state == "uploaded" and (.name as $asset_name
+        | $wanted[$asset_name] != null and .digest == $wanted[$asset_name].digest
+        and .size == $wanted[$asset_name].size))
+      and (if $complete then
+        ([.assets[].name] | sort) == ([$wanted | keys[]] | sort)
+      else true end)
+    ' "$snapshot" >/dev/null
+}
+
+upload_missing_assets() {
+  local root="$1" expected="$2" snapshot="$work_root/draft-upload.json" asset status
+  fetch_release_snapshot "$snapshot" || return 1
+  validate_draft_inventory "$snapshot" "$expected" false || return 1
+  while IFS= read -r asset; do
+    if jq -e --arg name "$asset" 'any(.assets[]; .name == $name)' "$snapshot" >/dev/null; then
+      continue
+    fi
+    if ! status=$(curl --proto '=https' --tlsv1.2 --silent --show-error \
+        --connect-timeout 30 --header "Authorization: Bearer $GH_TOKEN" \
+        --header 'Content-Type: application/octet-stream' --data-binary "@$root/$asset" \
+        "https://uploads.github.com/repos/$repo/releases/$release_id/assets?name=$asset" \
+        --output /dev/null --write-out '%{http_code}'); then
+      status=ambiguous
+    fi
+    if [ "$status" != 201 ]; then
+      echo "release asset upload was ambiguous; requiring exact numeric-ID read-back" >&2
+    fi
+    fetch_release_snapshot "$snapshot" || return 1
+    validate_draft_inventory "$snapshot" "$expected" false || return 1
+    jq -e --arg name "$asset" 'any(.assets[]; .name == $name)' "$snapshot" >/dev/null \
+      || return 1
+  done < <(jq -r '.[].name' "$expected")
+  validate_draft_inventory "$snapshot" "$expected" true
+}
+
+download_draft_asset() {
+  local snapshot="$1" asset="$2" output="$3" asset_id
+  asset_id=$(jq -er --arg name "$asset" '
+      [.assets[] | select(.name == $name)]
+      | select(length == 1) | .[0].id
+      | select(type == "number" and . > 0 and . == floor)
+    ' "$snapshot") || return 1
+  gh_api -H 'Accept: application/octet-stream' \
+    "repos/$repo/releases/assets/$asset_id" > "$output"
+}
+
 download_github_bundle() {
-  local state="$1" root release_json tag_json asset asset_size exact_assets_json asset_inventory
+  local state="$1" root release_json tag_json asset exact_assets_json
   root=$(mktemp -d) || return 1
+  release_json="$root/release.json"
+  fetch_release_snapshot "$release_json" || return 1
   if [ "$state" = draft ]; then
     for asset in "$cleanup_receipt" "$cleanup_manifest" "$cleanup_signature"; do
-      gh release download "$tag" --repo "$repo" --pattern "$asset" --dir "$root" || return 1
+      download_draft_asset "$release_json" "$asset" "$root/$asset" || return 1
     done
   else
     for asset in "$cleanup_receipt" "$cleanup_manifest" "$cleanup_signature"; do
@@ -185,35 +322,27 @@ download_github_bundle() {
     done
   fi
   verify_receipt_header "$root" || return 1
-  release_json="$root/release.json"
-  gh_api "repos/$repo/releases/tags/$tag" > "$release_json" || return 1
-  jq -e --arg notes "$release_notes" --slurpfile expected "$expected_assets_json" \
-    '.body == $notes and ([.assets[].name] | sort) == ($expected[0] | sort)' \
+  jq -e --argjson id "$release_id" --arg tag "$tag" --arg corpus "$CORPUS_COMMIT" \
+    --arg notes "$release_notes" --slurpfile expected "$expected_assets_json" '
+      .id == $id and .tag_name == $tag and .target_commitish == $corpus and .body == $notes
+      and ([.assets[].name] | sort) == ($expected[0] | sort)
+    ' \
     "$release_json" >/dev/null \
     || { echo "ERROR: GitHub release asset inventory is not exact" >&2; return 1; }
   while IFS= read -r asset; do
     [ -f "$root/$asset" ] && continue
     if [ "$state" = draft ]; then
-      gh release download "$tag" --repo "$repo" --pattern "$asset" --dir "$root" || return 1
+      download_draft_asset "$release_json" "$asset" "$root/$asset" || return 1
     else
       curl --fail --show-error --silent --location --retry 5 --retry-all-errors \
         "https://github.com/$repo/releases/download/$tag/$asset" -o "$root/$asset" || return 1
     fi
   done < <(jq -r '.[]' "$expected_assets_json")
   verify_complete_bundle "$root" || return 1
-  asset_inventory="$root/exact-release-assets.jsonl"
   exact_assets_json="$root/exact-release-assets.json"
-  : > "$asset_inventory"
-  while IFS= read -r asset; do
-    [ -f "$root/$asset" ] || { echo "ERROR: release is missing $asset" >&2; return 1; }
-    asset_size=$(size_file "$root/$asset") || return 1
-    [ "$asset_size" -lt 2147483648 ] \
-      || { echo "ERROR: GitHub-only release contains an asset at or above 2 GiB: $asset" >&2; return 1; }
-    jq -cn --arg name "$asset" --arg sha "$(sha256_file "$root/$asset")" \
-      --argjson size "$asset_size" '{name:$name,sha256:$sha,size:$size}' \
-      >> "$asset_inventory" || return 1
-  done < <(jq -r '.[]' "$expected_assets_json")
-  jq -s 'sort_by(.name)' "$asset_inventory" > "$exact_assets_json" || return 1
+  write_asset_inventory "$root" "$exact_assets_json" || return 1
+  jq -e 'all(.[]; .size < 2147483648)' "$exact_assets_json" >/dev/null \
+    || { echo "ERROR: GitHub-only release contains an asset at or above 2 GiB" >&2; return 1; }
   tag_json="$root/tag.json"
   validate_tag_target "$tag_json" || return 1
   if [ "$state" = public ]; then
@@ -224,13 +353,7 @@ download_github_bundle() {
       gh release verify-asset "$tag" "$root/$asset" --repo "$repo" >/dev/null || return 1
     done < <(jq -r '.[]' "$expected_assets_json")
   else
-    jq -e --arg tag "$tag" --arg corpus "$CORPUS_COMMIT" --arg notes "$release_notes" \
-      --slurpfile expected "$exact_assets_json" '
-      .draft == true and .prerelease == false and .tag_name == $tag
-      and .target_commitish == $corpus and .immutable == false and .body == $notes
-      and ([.assets[] | {name,sha256:(.digest | sub("^sha256:"; "")),size}] | sort_by(.name))
-        == ($expected[0] | sort_by(.name))
-    ' "$release_json" >/dev/null \
+    validate_draft_inventory "$release_json" "$exact_assets_json" true \
       || { echo "ERROR: draft release identity or asset digests are not exact" >&2; return 1; }
   fi
   bundle_root="$root"
@@ -246,39 +369,65 @@ require_github_immutable_releases() {
 }
 
 prepare_exact_draft() {
-  local root="$1" state release_json
+  local root="$1" status release_json="$work_root/draft-release.json"
+  local expected="$work_root/local-release-assets.json" payload="$work_root/create-release.json"
   require_github_immutable_releases
-  if state=$(gh_api "repos/$repo/releases/tags/$tag" 2>/dev/null); then
-    printf '%s' "$state" | jq -e --arg tag "$tag" --arg corpus "$CORPUS_COMMIT" \
-      --arg notes "$release_notes" '
-      .draft == true and .prerelease == false and .tag_name == $tag
-      and .target_commitish == $corpus and .immutable == false and .body == $notes
-    ' >/dev/null || { echo "ERROR: refusing to mutate an existing non-draft release" >&2; return 1; }
-  else
-    gh release create "$tag" --repo "$repo" --draft --target "$CORPUS_COMMIT" \
-      --title "index-$PUBLISHER ${ticket_id:0:12}" \
-      --notes "$release_notes"
+  write_asset_inventory "$root" "$expected" || return 1
+  if [ -z "$release_id" ]; then
+    if discover_exact_draft; then
+      :
+    else
+      status=$?
+      [ "$status" = 1 ] || return 1
+      jq -n --arg tag "$tag" --arg target "$CORPUS_COMMIT" \
+        --arg name "index-$PUBLISHER ${ticket_id:0:12}" --arg body "$release_notes" \
+        '{tag_name:$tag,target_commitish:$target,name:$name,body:$body,draft:true,prerelease:false}' \
+        > "$payload" || return 1
+      if gh_api --method POST "repos/$repo/releases" --input "$payload" > "$release_json"; then
+        release_id=$(jq -er '.id | select(type == "number" and . > 0 and . == floor)' \
+          "$release_json") || return 1
+      else
+        echo "draft creation response was ambiguous; requiring exact discovery" >&2
+        release_id=
+        discover_exact_draft || return 1
+      fi
+    fi
   fi
-  validate_tag_target "$work_root/draft-tag.json"
-  mapfile -t release_uploads < <(jq -r --arg root "$root/" '.[] | $root + .' "$expected_assets_json")
-  gh release upload "$tag" "${release_uploads[@]}" --repo "$repo" --clobber
-  release_json="$work_root/draft-release.json"
-  gh_api "repos/$repo/releases/tags/$tag" > "$release_json"
-  jq -e --slurpfile expected "$expected_assets_json" --arg corpus "$CORPUS_COMMIT" \
-    --arg notes "$release_notes" '
-      .draft == true and .prerelease == false and .target_commitish == $corpus
-      and .body == $notes
-      and ([.assets[].name] | sort) == ($expected[0] | sort)
-    ' "$release_json" >/dev/null || { echo "ERROR: exact draft publication failed" >&2; return 1; }
+  fetch_release_snapshot "$release_json" || return 1
+  validate_draft_inventory "$release_json" "$expected" false \
+    || { echo "ERROR: refusing to mutate a changed draft release" >&2; return 1; }
+  ensure_exact_tag || return 1
+  upload_missing_assets "$root" "$expected" || return 1
   download_github_bundle draft
 }
 
 finalize_and_verify_public_release() {
-  local state attempt
-  gh release edit "$tag" --repo "$repo" --draft=false >/dev/null
+  local state attempt status prepublish="$work_root/prepublish-release.json"
+  fetch_release_snapshot "$prepublish" || return 1
+  validate_draft_inventory "$prepublish" "$bundle_root/exact-release-assets.json" true || return 1
+  validate_tag_target "$work_root/prepublish-tag.json" || return 1
+  require_github_immutable_releases || return 1
+  jq -n '{draft:false,make_latest:"false"}' > "$work_root/publish-release.json" || return 1
+  if ! status=$(curl --proto '=https' --tlsv1.2 --silent --show-error \
+      --connect-timeout 30 --request PATCH --header "Authorization: Bearer $GH_TOKEN" \
+      --header 'Accept: application/vnd.github+json' \
+      --header 'X-GitHub-Api-Version: 2026-03-10' --header 'Content-Type: application/json' \
+      --data-binary "@$work_root/publish-release.json" \
+      "https://api.github.com/repos/$repo/releases/$release_id" \
+      --output "$work_root/published-response.json" --write-out '%{http_code}'); then
+    status=ambiguous
+  fi
+  if [ "$status" != 200 ]; then
+    echo "release publication response was ambiguous; requiring exact numeric-ID read-back" >&2
+  fi
   for attempt in $(seq 1 12); do
-    state=$(gh_api "repos/$repo/releases/tags/$tag")
-    if printf '%s' "$state" | jq -e '.draft == false and .immutable == true' >/dev/null; then
+    state="$work_root/public-release-$attempt.json"
+    if fetch_release_snapshot "$state" \
+        && jq -e --argjson id "$release_id" --arg tag "$tag" --arg corpus "$CORPUS_COMMIT" '
+          .id == $id and .tag_name == $tag and .target_commitish == $corpus
+          and .draft == false and .prerelease == false and .immutable == true
+        ' "$state" >/dev/null \
+        && validate_tag_target "$work_root/public-tag-$attempt.json"; then
       if download_github_bundle public; then
         return 0
       fi
@@ -289,4 +438,3 @@ finalize_and_verify_public_release() {
   echo "ERROR: GitHub release did not become immutable" >&2
   return 1
 }
-

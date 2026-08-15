@@ -84,6 +84,7 @@ cleanup_receipt="staging-cleanup-$PUBLISHER.json"
 cleanup_manifest="staging-cleanup-$PUBLISHER.manifest.json"
 cleanup_signature="staging-cleanup-$PUBLISHER.manifest.sig"
 tag="index-$PUBLISHER-$ticket_id"
+release_id=
 stamp=$(jq -er .generated_at "$ticket_file")
 claim_name="publication-runs/$PUBLISHER/$ticket_id.json"
 claim_file="$work_root/publication-run.json"
@@ -507,13 +508,14 @@ case "$PUBLICATION_PHASE" in
     echo "=== validate exact private staging snapshot ==="
     capture_staging_snapshot "$work_root/staging.json"
     download_staging_snapshot "$work_root/staging.json"
-    if release_state=$(gh_api "repos/$repo/releases/tags/$tag" 2>/dev/null); then
-      if printf '%s' "$release_state" | jq -e '.draft == false' >/dev/null; then
-        download_github_bundle public
-        publish_pointer_from_bundle "$bundle_root"
-        echo "published_manifest=$manifest_id"
-        exit 0
-      fi
+    if pin_public_release; then
+      download_github_bundle public
+      publish_pointer_from_bundle "$bundle_root"
+      echo "published_manifest=$manifest_id"
+      exit 0
+    fi
+    draft_status=0
+    if discover_exact_draft; then
       if download_github_bundle draft; then
         finalize_and_verify_public_release
         publish_pointer_from_bundle "$bundle_root"
@@ -521,6 +523,10 @@ case "$PUBLICATION_PHASE" in
         exit 0
       fi
       echo "incomplete same-run draft found; rebuilding before publication" >&2
+    else
+      draft_status=$?
+      [ "$draft_status" = 1 ] \
+        || { echo "ERROR: existing draft locator is not exact" >&2; exit 1; }
     fi
     echo "=== authenticate previous pointer and enforce monotonic corpus lineage ==="
     snapshot_current_pointer
@@ -534,6 +540,7 @@ case "$PUBLICATION_PHASE" in
     ;;
   postflight-cleanup)
     echo "=== verify public GitHub release ==="
+    pin_public_release
     download_github_bundle public
     echo "=== verify current artifact pointer ==="
     verify_current_pointer "$bundle_root"
