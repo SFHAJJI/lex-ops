@@ -18,7 +18,7 @@ RELEASE_CONTRACT = ROOT / "scripts" / "assistant_evaluation_release_contract.sh"
 
 
 class WorkflowContractTests(unittest.TestCase):
-    def test_one_time_failed_publication_cleanup_is_exact_except_for_two_claims(self):
+    def test_one_time_failed_eu_publication_cleanup_preserves_draft_and_tag(self):
         path = WORKFLOWS / "recover-stale-publication-claims.yml"
         self.assertTrue(path.exists(), "the exact one-time stale-claim recovery is missing")
         workflow = path.read_text(encoding="utf-8")
@@ -33,50 +33,53 @@ class WorkflowContractTests(unittest.TestCase):
             "contents: read",
             "id-token: write",
             "GH_TOKEN: ${{ secrets.LEX_OPS_TOKEN }}",
-            "699972bdf5c288e0cd3abb0cb1da93493506f8c6",
+            "f6dbe64d2f6825517090f9b40117be66dd54a02f",
             ".github/workflows/publish-prebuilt-index.yml",
             'status == "completed"',
             'conclusion == "failure"',
-            "31902129511",
-            "31902130547",
+            "RUN_ID=31904321452 RUN_NUMBER=15",
+            "RUN_CREATED=2026-08-15T19:35:01Z RUN_UPDATED=2026-08-15T19:44:16Z",
+            ".run_attempt == 2",
             "publication-runs/eu-eurlex/cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c.json",
-            "0x8DEFAFDD62336EF",
-            "2c877aef5c6f93d9b3a377bf1f8dfb4dbbe7ca0d1d135716c3c8e999bd0efef8",
-            "publication-runs/lu-legilux/f2d4c2ed2b673f9db4abda429ba1451c3be80a4344ab589c86b1a7f29d39819c.json",
-            "0x8DEFAFDD8D052CB",
-            "bd48e8d26cb8213edacb8e1622334d83a092e88ea350ef8cd69b67be732e07bc",
+            "0x8DEFB04623F633A",
+            "89d6b103a541a4c24abd50a51ddbe1d5ac6e23668feb4490499e34f994e063fc",
+            "wr9yrcvM5IlyzKROYMSX5A==",
+            "CLAIM_SIZE=702",
             "current/eu-eurlex.json",
             "0x8DEF9C349323805",
             "a460020a374eaeb7adbcd87fdbeaeb231055e9efd4767422c5940a3f9cf842dc",
-            "current/lu-legilux.json",
-            "0x8DEF94A869B8C85",
-            "6b25b34ab4e773c9f7b417183dc04dcc813c60ed96571fe636818d914aa215c0",
             "0x8DEFAEA3A7D4D33",
             "f827e089bddff64709926af4341bc0ddbfbef829a5c3e29400754aec3b649fd9",
             "589156352",
             "0x8DEFAEC4628DF51",
             "fb600d1221ab108f5f55f287682844b9f2fa03308c5401ed7d9488ae2544b6ad",
             "140342576",
-            "0x8DEFAB4AEE3239C",
-            "fd404e736c29c4d19174ceb2c14667a80270409d222053fee79f0e25e910c0fa",
-            "717422592",
-            "0x8DEFAB4AB09F1A2",
-            "4a4d5fae77d72e74e4c295eb119f15add988cda6fce85b470ca1eb3873b2294b",
-            "46831856",
             "6a2fb2647dea3ba0b3391e40a0612073c626ef0966bd816cdb8b99b57135c8da",
             "index-eu-eurlex-cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c",
-            "index-lu-legilux-f2d4c2ed2b673f9db4abda429ba1451c3be80a4344ab589c86b1a7f29d39819c",
-            "require_github_404",
+            "e9c4df0981c855855a1a28218cf086ddeb5bb691",
+            "371139989",
+            "index-eu-eurlex cc6890caa445",
+            "Signed index, benchmark activation evidence, and whole-release manifest.",
+            "Semantic activation: false",
+            "Runtime quarantine guard: 03f94295f3e678b47cb0511a082698f34373679c",
             "verify_failed_run",
-            "verify_draft_absent",
+            "verify_exact_draft_and_tag",
             "release(tagName:$tag)",
-            ".data.repository.release == null",
+            ".data.repository.release.databaseId == $id",
+            ".target_commitish == $target",
+            ".draft == true",
+            ".prerelease == false",
+            ".immutable == false",
+            ".published_at == null",
+            ".assets == []",
+            '.object.type == "commit"',
+            ".object.sha == $sha",
+            "staged inventory, metadata, sizes, and ETags remained exact",
             "verify_claim",
             "inspect_claim",
             "verify_pointer",
             "verify_staging_snapshot",
             "prove_claim_absent",
-            "HTTP 404",
             "--if-match",
             "$GITHUB_STEP_SUMMARY",
         ):
@@ -94,12 +97,18 @@ class WorkflowContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("group: publish-prebuilt-${{ inputs.publisher }}", publisher_workflow)
-        self.assertIn("group: publish-prebuilt-${{ matrix.publisher }}", workflow)
-        self.assertIn("publisher: [eu-eurlex, lu-legilux]", workflow)
+        self.assertIn("group: publish-prebuilt-eu-eurlex", workflow)
+        self.assertIn("PUBLISHER: eu-eurlex", workflow)
+        self.assertNotIn("matrix:", workflow)
+        self.assertNotIn("matrix.publisher", workflow)
         self.assertEqual(1, workflow.count("group: lex-production"))
         self.assertEqual(1, workflow.count("az storage blob delete"))
+        self.assertEqual(
+            2,
+            workflow.count("az storage blob download"),
+            "only the claim and pointer require recovery-time byte downloads",
+        )
         self.assertEqual(0, workflow.count("--request DELETE"))
-        self.assertNotIn("DRAFT_URL", workflow)
         self.assertIn('--name "$CLAIM_NAME" --if-match "$CLAIM_ETAG"', workflow)
         self.assertEqual(1, workflow.count("present) delete_claim ;;"))
         self.assertIn("false) printf -v \"$result_name\" '%s' absent", workflow)
@@ -118,12 +127,12 @@ class WorkflowContractTests(unittest.TestCase):
             2,
             len(
                 re.findall(
-                    r"^\s+verify_public_target_absent (?:before|after)$",
+                    r"^\s+verify_exact_draft_and_tag (?:before|after)$",
                     workflow,
                     re.MULTILINE,
                 )
             ),
-            "each publisher release and tag must be absent before and after cleanup",
+            "the exact EU draft and tag must be verified before and after cleanup",
         )
         self.assertEqual(
             workflow.count("az storage blob "),
@@ -144,6 +153,10 @@ class WorkflowContractTests(unittest.TestCase):
             "workflow_call:",
             "schedule:",
             " -X ",
+            "lu-legilux",
+            "31902129511",
+            "31902130547",
+            "699972bdf5c288e0cd3abb0cb1da93493506f8c6",
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, workflow)
@@ -246,7 +259,7 @@ printf 'initial=%s inspected=%s final=%s\n' \
                         self.assertIn(
                             "--name publication-runs/eu-eurlex/"
                             "cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c.json "
-                            "--if-match 0x8DEFAFDD62336EF",
+                            "--if-match 0x8DEFB04623F633A",
                             commands,
                         )
                         self.assertIn("deletion response was ambiguous", completed.stderr)
@@ -278,7 +291,6 @@ printf 'initial=%s inspected=%s final=%s\n' \
 
         mocks = r'''
 github_get() { :; }
-require_github_404() { :; }
 gh() { :; }
 jq() { return 0; }
 az() {
@@ -294,8 +306,7 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
 
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             for invocation in (
-                "verify_public_target_absent before",
-                "verify_draft_absent before",
+                "verify_exact_draft_and_tag before",
                 "verify_pointer before",
             ):
                 with self.subTest(invocation=invocation):
