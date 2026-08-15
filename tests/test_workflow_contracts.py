@@ -18,7 +18,7 @@ RELEASE_CONTRACT = ROOT / "scripts" / "assistant_evaluation_release_contract.sh"
 
 
 class WorkflowContractTests(unittest.TestCase):
-    def test_one_time_failed_publication_cleanup_is_exact_except_for_two_drafts_and_claims(self):
+    def test_one_time_failed_publication_cleanup_is_exact_except_for_two_claims(self):
         path = WORKFLOWS / "recover-stale-publication-claims.yml"
         self.assertTrue(path.exists(), "the exact one-time stale-claim recovery is missing")
         workflow = path.read_text(encoding="utf-8")
@@ -33,20 +33,18 @@ class WorkflowContractTests(unittest.TestCase):
             "contents: read",
             "id-token: write",
             "GH_TOKEN: ${{ secrets.LEX_OPS_TOKEN }}",
-            "6c2451c53fb7dfdafefc603e58bbd120b32b3900",
+            "699972bdf5c288e0cd3abb0cb1da93493506f8c6",
             ".github/workflows/publish-prebuilt-index.yml",
             'status == "completed"',
             'conclusion == "failure"',
-            "31899331991",
-            "31899333016",
+            "31902129511",
+            "31902130547",
             "publication-runs/eu-eurlex/cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c.json",
-            "0x8DEFAF570E2A58C",
-            "d718f9531b1736cd6da9aa0a62d96a73aa4ee2867e557c4a0f5baa6d8b719c67",
+            "0x8DEFAFDD62336EF",
+            "2c877aef5c6f93d9b3a377bf1f8dfb4dbbe7ca0d1d135716c3c8e999bd0efef8",
             "publication-runs/lu-legilux/f2d4c2ed2b673f9db4abda429ba1451c3be80a4344ab589c86b1a7f29d39819c.json",
-            "0x8DEFAF570ADAFEE",
-            "dc55fe5727bfa91e79f83539068d763d4b9a457db883739f9a1b99c0970b9a27",
-            "371118531",
-            "371118214",
+            "0x8DEFAFDD8D052CB",
+            "bd48e8d26cb8213edacb8e1622334d83a092e88ea350ef8cd69b67be732e07bc",
             "current/eu-eurlex.json",
             "0x8DEF9C349323805",
             "a460020a374eaeb7adbcd87fdbeaeb231055e9efd4767422c5940a3f9cf842dc",
@@ -70,6 +68,9 @@ class WorkflowContractTests(unittest.TestCase):
             "index-lu-legilux-f2d4c2ed2b673f9db4abda429ba1451c3be80a4344ab589c86b1a7f29d39819c",
             "require_github_404",
             "verify_failed_run",
+            "verify_draft_absent",
+            "release(tagName:$tag)",
+            ".data.repository.release == null",
             "verify_claim",
             "inspect_claim",
             "verify_pointer",
@@ -97,8 +98,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("publisher: [eu-eurlex, lu-legilux]", workflow)
         self.assertEqual(1, workflow.count("group: lex-production"))
         self.assertEqual(1, workflow.count("az storage blob delete"))
-        self.assertEqual(1, workflow.count("--request DELETE"))
-        self.assertIn('"$DRAFT_URL"', workflow)
+        self.assertEqual(0, workflow.count("--request DELETE"))
+        self.assertNotIn("DRAFT_URL", workflow)
         self.assertIn('--name "$CLAIM_NAME" --if-match "$CLAIM_ETAG"', workflow)
         self.assertEqual(1, workflow.count("present) delete_claim ;;"))
         self.assertIn("false) printf -v \"$result_name\" '%s' absent", workflow)
@@ -176,24 +177,7 @@ class WorkflowContractTests(unittest.TestCase):
 
         harness = prelude + r'''
 mock_state="$INITIAL_STATE"
-draft_state_file="$RUNNER_TEMP/draft-state-$PUBLISHER"
-printf '%s' "$INITIAL_STATE" > "$draft_state_file"
 jq() { return 0; }
-curl() {
-  if [[ " $* " == *" --request DELETE "* ]]; then
-    printf '%s\n' draft-delete >> "$MOCK_LOG"
-    printf '%s' absent > "$draft_state_file"
-    return "$DELETE_EXIT"
-  fi
-  if [ "$(cat "$draft_state_file")" = present ]; then
-    printf '{}' > "$work_root/draft.json"; printf 200
-  else
-    printf '{"message":"Not Found"}' > "$work_root/draft.json"; printf 404
-  fi
-}
-github_get() { printf '{}' > "$2"; printf '%s\n' draft-get >> "$MOCK_LOG"; }
-verify_exact_draft() { printf '%s\n' draft-verified >> "$MOCK_LOG"; }
-require_github_404() { [ "$(cat "$draft_state_file")" = absent ]; }
 az() {
   printf '%s\n' "$*" >> "$MOCK_LOG"
   case "$1 $2 $3" in
@@ -211,13 +195,6 @@ az() {
   esac
 }
 verify_claim() { printf '%s\n' verified >> "$MOCK_LOG"; }
-draft_state=
-inspect_draft draft_state
-case "$draft_state" in
-  present) delete_draft ;;
-  absent) prove_draft_absent ;;
-  *) die "invalid test draft state" ;;
-esac
 claim_state=
 inspect_claim claim_state
 case "$claim_state" in
@@ -226,8 +203,8 @@ case "$claim_state" in
   *) die "invalid test claim state" ;;
 esac
 prove_claim_absent
-printf 'initial=%s inspected=%s final=%s draft=%s\n' \
-  "$INITIAL_STATE" "$claim_state" "$mock_state" "$(cat "$draft_state_file")"
+printf 'initial=%s inspected=%s final=%s\n' \
+  "$INITIAL_STATE" "$claim_state" "$mock_state"
 '''
 
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
@@ -260,20 +237,16 @@ printf 'initial=%s inspected=%s final=%s draft=%s\n' \
                     self.assertIn(f"initial={initial_state}", completed.stdout)
                     self.assertIn(f"inspected={initial_state}", completed.stdout)
                     self.assertIn("final=absent", completed.stdout)
-                    self.assertIn("draft=absent", completed.stdout)
                     if initial_state == "absent":
                         self.assertNotIn("storage blob delete", commands)
-                        self.assertNotIn("draft-delete", commands)
                         self.assertNotIn("verified", commands)
                     else:
                         self.assertEqual(1, commands.count("storage blob delete"))
-                        self.assertEqual(1, commands.count("draft-delete"))
-                        self.assertLess(commands.index("draft-delete"), commands.index("storage blob delete"))
                         self.assertIn("verified", commands)
                         self.assertIn(
                             "--name publication-runs/eu-eurlex/"
                             "cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c.json "
-                            "--if-match 0x8DEFAF570E2A58C",
+                            "--if-match 0x8DEFAFDD62336EF",
                             commands,
                         )
                         self.assertIn("deletion response was ambiguous", completed.stderr)
@@ -306,6 +279,7 @@ printf 'initial=%s inspected=%s final=%s draft=%s\n' \
         mocks = r'''
 github_get() { :; }
 require_github_404() { :; }
+gh() { :; }
 jq() { return 0; }
 az() {
   case "$1 $2 $3" in
@@ -321,6 +295,7 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             for invocation in (
                 "verify_public_target_absent before",
+                "verify_draft_absent before",
                 "verify_pointer before",
             ):
                 with self.subTest(invocation=invocation):
