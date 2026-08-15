@@ -29,9 +29,12 @@ be forced past the publication gates.
 - `status/index-queue.json` - a content-addressed queue/2 ticket binding the exact corpus manifests,
   derived generation and Lex build commit awaiting a local index build, read from an immutable
   `fleet-status` commit. Retrying the same inputs reuses its ticket identity.
-- `LEX_OPS_TOKEN` authorizes cross-repository pushes. It is an interim OAuth token and must be
-  replaced with a GitHub App installation token by the third publisher or 90 days, whichever
-  comes first (spec §11.1).
+- `LEX_OPS_TOKEN` authorizes cross-repository pushes. The assistant-evaluation publisher exposes it
+  only for one hard-coded prepublication Immutable Releases setting read: the sole step on a fresh,
+  no-checkout runner, never shared with repository or evaluated code. Normal `GITHUB_TOKEN`
+  authority performs every assistant-evaluation tag and release write, and final publication
+  patches the pinned numeric release ID. The interim OAuth token must be replaced with a GitHub App
+  installation token by the third publisher or 90 days, whichever comes first (spec §11.1).
 - `LEX_SIGNING_KEY` is retained, unused by enabled workflows, only for the dated rollback window.
   It is not the trust root for released artifacts.
 
