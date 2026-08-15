@@ -7,23 +7,41 @@ on:
         description: Enabled publisher id
         required: true
         type: choice
-        options:
-          - eu-eurlex
-          - lu-legilux
+        options: [eu-eurlex, lu-legilux]
       staging_prefix:
-        description: Private Blob prefix containing the prebuilt DB and vector file
+        description: Canonical staging/<publisher>/<ticket-id> prefix
         required: true
         type: string
       queue_commit:
-        description: Full lex-ops fleet-status commit containing the immutable index-build ticket
+        description: Full fleet-status commit containing the immutable build ticket
+        required: true
+        type: string
+      workflow_commit:
+        description: Exact current lex-ops main commit containing this workflow
         required: true
         type: string
       index_sha256:
-        description: Expected SHA-256 of index-<publisher>.db
+        description: Expected SHA-256 of the DB
+        required: true
+        type: string
+      index_etag:
+        description: Exact unquoted private Blob ETag of the DB
+        required: true
+        type: string
+      index_size:
+        description: Exact DB byte length
         required: true
         type: string
       vectors_sha256:
-        description: Expected SHA-256 of index-<publisher>.vectors
+        description: Expected SHA-256 of the vector companion
+        required: true
+        type: string
+      vectors_etag:
+        description: Exact unquoted private Blob ETag of the vector companion
+        required: true
+        type: string
+      vectors_size:
+        description: Exact vector-companion byte length
         required: true
         type: string
 
@@ -37,7 +55,64 @@ concurrency:
 
 jobs:
   publish:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && github.sha == inputs.workflow_commit
+    environment: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Recheck immutable workflow and queue identities
+        env:
+          QUEUE_COMMIT: ${{ inputs.queue_commit }}
+          WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+        run: |
+          set -euo pipefail
+          [[ "$WORKFLOW_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$QUEUE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [ "$(git rev-parse HEAD)" = "$WORKFLOW_COMMIT" ]
+          git fetch --no-tags origin \
+            +refs/heads/fleet-status:refs/remotes/origin/fleet-status
+          git merge-base --is-ancestor "$QUEUE_COMMIT" refs/remotes/origin/fleet-status
+
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Azure login for private staging, coordination, and signing
+        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Publish without staging cleanup
+        env:
+          PUBLICATION_PHASE: publish
+          GH_TOKEN: ${{ secrets.LEX_OPS_TOKEN }}
+          PUBLISHER: ${{ inputs.publisher }}
+          STAGING_PREFIX: ${{ inputs.staging_prefix }}
+          QUEUE_COMMIT: ${{ inputs.queue_commit }}
+          WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+          EXPECTED_INDEX_SHA256: ${{ inputs.index_sha256 }}
+          EXPECTED_INDEX_ETAG: ${{ inputs.index_etag }}
+          EXPECTED_INDEX_SIZE: ${{ inputs.index_size }}
+          EXPECTED_VECTORS_SHA256: ${{ inputs.vectors_sha256 }}
+          EXPECTED_VECTORS_ETAG: ${{ inputs.vectors_etag }}
+          EXPECTED_VECTORS_SIZE: ${{ inputs.vectors_size }}
+          AZURE_INDEX_STORAGE_ACCOUNT: ${{ vars.AZURE_INDEX_STORAGE_ACCOUNT }}
+          AZURE_KEY_VAULT: ${{ vars.AZURE_KEY_VAULT }}
+          AZURE_KEY_NAME: ${{ vars.AZURE_KEY_NAME }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: bash publish-prebuilt-index.sh
+
+  postflight_cleanup:
+    needs: publish
+    if: github.ref == 'refs/heads/main' && github.sha == inputs.workflow_commit
     environment: production
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -46,68 +121,44 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Resolve immutable build ticket
-        id: ticket
-        shell: bash
+      - name: Independently recheck immutable workflow and queue identities
         env:
           QUEUE_COMMIT: ${{ inputs.queue_commit }}
-          PUBLISHER: ${{ inputs.publisher }}
+          WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
         run: |
           set -euo pipefail
-          [[ "$QUEUE_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
-            || { echo "::error::queue commit must be a full lowercase SHA"; exit 2; }
+          [[ "$WORKFLOW_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$QUEUE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [ "$(git rev-parse HEAD)" = "$WORKFLOW_COMMIT" ]
           git fetch --no-tags origin \
             +refs/heads/fleet-status:refs/remotes/origin/fleet-status
-          git cat-file -e "$QUEUE_COMMIT^{commit}"
-          git merge-base --is-ancestor "$QUEUE_COMMIT" refs/remotes/origin/fleet-status \
-            || { echo "::error::queue commit is not on the generated fleet-status history"; exit 2; }
-          ticket_file=$(mktemp)
-          git show "$QUEUE_COMMIT:status/index-queue.json" > "$ticket_file"
-          bash scripts/v4-release-contract.sh validate-ticket "$ticket_file"
-          jq -e --arg pub "$PUBLISHER" \
-            '.mode == "prebuilt"
-             and ([.entries[] | select(.collection == $pub)] | length == 1)' \
-            "$ticket_file" >/dev/null
-          repo=$(jq -er --arg pub "$PUBLISHER" \
-            '.publishers[] | select(.enabled and .id == $pub) | .corpus_repo' publishers.json)
-          ticket_repo=$(jq -er --arg pub "$PUBLISHER" \
-            '.entries[] | select(.collection == $pub) | .corpus_repo' "$ticket_file")
-          [ "$repo" = "$ticket_repo" ] \
-            || { echo "::error::ticket corpus repository does not match the registry"; exit 2; }
-          echo "build_code_commit=$(jq -er .build_code_commit "$ticket_file")" >> "$GITHUB_OUTPUT"
-          echo "articles_commit=$(jq -er .articles_commit "$ticket_file")" >> "$GITHUB_OUTPUT"
-          echo "corpus_commit=$(jq -er --arg pub "$PUBLISHER" '.entries[] | select(.collection == $pub) | .corpus_commit' "$ticket_file")" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          repository: SFHAJJI/lex
-          path: lex
-          fetch-depth: 0
-          ref: ${{ steps.ticket.outputs.build_code_commit }}
+          git merge-base --is-ancestor "$QUEUE_COMMIT" refs/remotes/origin/fleet-status
 
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           dotnet-version: 10.0.x
 
-      - name: Azure login for private staging and non-exportable signing
+      - name: Azure login for independent postflight
         uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Validate, sign, benchmark, and publish
+      - name: Verify release and remove only the exact staging snapshot
         env:
+          PUBLICATION_PHASE: postflight-cleanup
           GH_TOKEN: ${{ secrets.LEX_OPS_TOKEN }}
           PUBLISHER: ${{ inputs.publisher }}
           STAGING_PREFIX: ${{ inputs.staging_prefix }}
           QUEUE_COMMIT: ${{ inputs.queue_commit }}
-          CORPUS_COMMIT: ${{ steps.ticket.outputs.corpus_commit }}
-          BUILD_CODE_COMMIT: ${{ steps.ticket.outputs.build_code_commit }}
-          ARTICLES_COMMIT: ${{ steps.ticket.outputs.articles_commit }}
+          WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
           EXPECTED_INDEX_SHA256: ${{ inputs.index_sha256 }}
+          EXPECTED_INDEX_ETAG: ${{ inputs.index_etag }}
+          EXPECTED_INDEX_SIZE: ${{ inputs.index_size }}
           EXPECTED_VECTORS_SHA256: ${{ inputs.vectors_sha256 }}
-          ARTIFACT_KEY_ID: ${{ vars.ARTIFACT_KEY_ID }}
+          EXPECTED_VECTORS_ETAG: ${{ inputs.vectors_etag }}
+          EXPECTED_VECTORS_SIZE: ${{ inputs.vectors_size }}
           AZURE_INDEX_STORAGE_ACCOUNT: ${{ vars.AZURE_INDEX_STORAGE_ACCOUNT }}
           AZURE_KEY_VAULT: ${{ vars.AZURE_KEY_VAULT }}
           AZURE_KEY_NAME: ${{ vars.AZURE_KEY_NAME }}

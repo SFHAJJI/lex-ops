@@ -225,12 +225,20 @@ class FleetStatusTests(unittest.TestCase):
 
     def test_prebuilt_publication_consumes_status_branch_and_rechecks_source_histories(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "publish-prebuilt-index.yml").read_text(encoding="utf-8")
-        publisher = (ROOT / "publish-prebuilt-index.sh").read_text(encoding="utf-8")
+        publisher = "\n".join(
+            (ROOT / path).read_text(encoding="utf-8")
+            for path in (
+                "publish-prebuilt-index.sh",
+                "scripts/prebuilt-publication-build.sh",
+                "scripts/prebuilt-publication-release.sh",
+            )
+        )
 
         self.assertIn("refs/remotes/origin/fleet-status", workflow)
         self.assertIn("refs/remotes/origin/fleet-status", publisher)
         self.assertIn("git fetch --no-tags origin", publisher)
-        self.assertEqual(4, publisher.count("bash require-ancestor.sh"))
+        self.assertEqual(5, publisher.count("bash require-ancestor.sh"))
+        self.assertIn("hybrid quarantine runtime guard", publisher)
 
 
 if __name__ == "__main__":

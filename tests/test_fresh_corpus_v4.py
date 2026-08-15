@@ -8,7 +8,14 @@ WORKFLOW = (ROOT / ".github" / "workflows" / "fresh-corpus-v4.yml").read_text(
     encoding="utf-8"
 )
 FLEET = (ROOT / "fleet.sh").read_text(encoding="utf-8")
-PREBUILT = (ROOT / "publish-prebuilt-index.sh").read_text(encoding="utf-8")
+PREBUILT = "\n".join(
+    (ROOT / path).read_text(encoding="utf-8")
+    for path in (
+        "publish-prebuilt-index.sh",
+        "scripts/prebuilt-publication-build.sh",
+        "scripts/prebuilt-publication-release.sh",
+    )
+)
 RELEASE_CONTRACT = (ROOT / "scripts" / "v4-release-contract.sh").read_text(
     encoding="utf-8"
 )
