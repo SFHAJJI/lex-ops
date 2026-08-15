@@ -243,6 +243,70 @@ printf 'initial=%s inspected=%s final=%s\n' "$INITIAL_STATE" "$claim_state" "$mo
                         )
                         self.assertIn("deletion response was ambiguous", completed.stderr)
 
+    def test_one_time_stale_claim_cleanup_helpers_run_with_nounset(self):
+        workflow = (WORKFLOWS / "recover-stale-publication-claims.yml").read_text(
+            encoding="utf-8"
+        )
+        marker = "        run: |\n"
+        run_script = "\n".join(
+            line[10:] if line.startswith("          ") else line
+            for line in workflow.split(marker, 1)[1].splitlines()
+        )
+        main_marker = '[[ "$EXPECTED_WORKFLOW_COMMIT" =~'
+        prelude = run_script.split(main_marker, 1)[0]
+
+        if os.name == "nt":
+            bash = (
+                Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+                / "Git"
+                / "bin"
+                / "bash.exe"
+            )
+            bash_path = str(bash) if bash.exists() else None
+        else:
+            bash_path = shutil.which("bash")
+        if not bash_path:
+            self.skipTest("bash is required for the workflow recovery regression")
+
+        mocks = r'''
+github_get() { :; }
+require_github_404() { :; }
+jq() { return 0; }
+az() {
+  case "$1 $2 $3" in
+    "storage blob show") printf '{}\n' ;;
+    "storage blob download") return 0 ;;
+    *) return 97 ;;
+  esac
+}
+sha256_file() { printf '%s' "$POINTER_SHA256"; }
+size_file() { printf '%s' "$POINTER_SIZE"; }
+'''
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            for invocation in (
+                "verify_absent_target before",
+                "verify_pointer before",
+            ):
+                with self.subTest(invocation=invocation):
+                    environment = os.environ.copy()
+                    environment.update(
+                        {
+                            "PUBLISHER": "eu-eurlex",
+                            "RUNNER_TEMP": Path(temporary).as_posix(),
+                        }
+                    )
+                    completed = subprocess.run(
+                        [bash_path],
+                        cwd=ROOT,
+                        env=environment,
+                        input=prelude + mocks + invocation + "\n",
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(0, completed.returncode, completed.stderr)
+
     def test_exact_eu_staging_metadata_repair_is_bounded_and_conditional(self):
         path = WORKFLOWS / "repair-eu-staging-metadata.yml"
         self.assertTrue(path.exists(), "the reviewed one-time repair workflow is missing")
