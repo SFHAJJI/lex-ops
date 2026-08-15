@@ -92,6 +92,50 @@ validate_corpus_manifest() {
   printf '%s\n' "$ingester"
 }
 
+classify_corpus_resume() {
+  local publisher="$1" manifest="$2" current_source="$3" lex_repo="$4" current_commit="$5"
+  local ingester historical_source action
+  [[ "$current_commit" =~ ^[0-9a-f]{40}$ ]] \
+    || fail "current Lex commit must be a full lowercase SHA"
+  git -C "$lex_repo" cat-file -e "${current_commit}^{commit}" 2>/dev/null \
+    || fail "current Lex commit is absent from the reviewed repository"
+  ingester=$(jq -er --arg publisher "$publisher" '
+    select(.schema == "lex-corpus/4" and .publisher.id == $publisher)
+    | .ingester_code_commit
+    | select(type == "string" and test("^[0-9a-f]{40}$"))
+  ' "$manifest") || fail "corpus manifest is not exact lex-corpus/4 publisher evidence"
+  git -C "$lex_repo" merge-base --is-ancestor "$ingester" "$current_commit" \
+    || fail "existing v4 corpus was not materialized by a protected Lex ancestor"
+
+  case "$publisher" in
+    eu-eurlex)
+      [ "$current_source" != "-" ] && [ -f "$current_source" ] \
+        || fail "current EUR-Lex source configuration is required"
+      historical_source=$(mktemp)
+      git -C "$lex_repo" show \
+        "${ingester}:src/Lex.Sources.EurLex/eu-scope.json" \
+        > "$historical_source" \
+        || fail "existing EUR-Lex materializer has no source configuration"
+      validate_corpus_manifest \
+        "$publisher" "$manifest" "$historical_source" "$ingester" >/dev/null
+      if cmp -s "$historical_source" "$current_source"; then
+        action=reuse
+      else
+        action=rebuild
+      fi
+      rm -f "$historical_source"
+      ;;
+    lu-legilux)
+      [ "$current_source" = "-" ] \
+        || fail "Legilux current source configuration must be code-only"
+      validate_corpus_manifest "$publisher" "$manifest" - "$ingester" >/dev/null
+      action=reuse
+      ;;
+    *) fail "unsupported publisher $publisher" ;;
+  esac
+  printf '%s %s\n' "$action" "$ingester"
+}
+
 validate_generation() {
   local publisher="$1" repository="$2" corpus_commit="$3" deriver_commit="$4" tree_id="$5"
   local manifest="$6" generation="$7" source_configuration="$8"
@@ -268,6 +312,10 @@ validate_protected_code() {
 }
 
 case "${1:-}" in
+  classify-corpus-resume)
+    [ "$#" -eq 6 ] || fail "usage: $0 classify-corpus-resume PUBLISHER MANIFEST CURRENT_SOURCE_OR_DASH LEX_REPOSITORY CURRENT_COMMIT"
+    classify_corpus_resume "$2" "$3" "$4" "$5" "$6"
+    ;;
   validate-corpus-manifest)
     [ "$#" -eq 5 ] || fail "usage: $0 validate-corpus-manifest PUBLISHER MANIFEST SOURCE_CONFIGURATION_OR_DASH EXPECTED_INGESTER_OR_DASH"
     validate_corpus_manifest "$2" "$3" "$4" "$5"

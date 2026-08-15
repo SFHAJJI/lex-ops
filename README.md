@@ -68,8 +68,9 @@ version layout. It requires the exact reviewed Lex `main` commit, approval throu
 serializes with the nightly Fleet, builds Luxembourg and EU candidates in parallel beside disposable
 checkouts, and publishes only after the application proves every held baseline work and dated state
 is represented before body acquisition. A partial matrix success is resumable: an already committed
-v4 corpus is verified and reused only when its materializing Lex commit is identical. After both
-protected corpus heads exist, the workflow derives each publisher once, commits one canonical
+v4 corpus is verified and reused when its materializing Lex commit is a protected ancestor and its
+publisher source configuration is unchanged; a changed EU scope is rebuilt. After both protected
+corpus heads exist, the workflow derives each publisher once, commits one canonical
 articles generation, and writes an immutable prebuilt-index ticket for the local DirectML builder.
 Cancellation after either Git publication is recoverable: exact existing bytes and the same ticket
 are verified and reused rather than reacquired, rewritten or queued twice.

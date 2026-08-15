@@ -40,8 +40,25 @@ class FreshCorpusV4ContractTests(unittest.TestCase):
 
     def test_a_partial_matrix_success_resumes_without_a_second_publisher_poll(self):
         self.assertIn('= "lex-corpus/4"', SCRIPT)
-        self.assertIn("corpus manifest was materialized by another Lex commit", RELEASE_CONTRACT)
+        self.assertIn("classify-corpus-resume", SCRIPT)
+        self.assertIn(
+            'git -C "$lex_repo" merge-base --is-ancestor "$ingester" "$current_commit"',
+            RELEASE_CONTRACT,
+        )
+        self.assertIn(
+            '"${ingester}:src/Lex.Sources.EurLex/eu-scope.json"',
+            RELEASE_CONTRACT,
+        )
+        self.assertIn('cmp -s "$historical_source" "$current_source"', RELEASE_CONTRACT)
+        self.assertIn("protected Lex ancestor", RELEASE_CONTRACT)
         self.assertIn("already committed and verified", SCRIPT)
+        decision = SCRIPT.index("classify-corpus-resume")
+        ingest = SCRIPT.index('"${lex_cli[@]}" ingest --fresh')
+        resume = SCRIPT[decision:ingest]
+        self.assertIn('if [ "$resume_action" = reuse ]', resume)
+        self.assertIn('"${lex_cli[@]}" verify corpus', resume)
+        self.assertIn("return 0", resume)
+        self.assertIn("reviewed source configuration changed", resume)
         self.assertLess(SCRIPT.index('= "lex-corpus/4"'), SCRIPT.index("ingest --fresh"))
 
     def test_derivation_is_retryable_and_only_a_bounded_spot_check_repeats(self):
