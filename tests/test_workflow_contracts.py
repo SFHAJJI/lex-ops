@@ -14,6 +14,85 @@ IDENTITY_SCRIPT = ROOT / "scripts" / "assistant_evaluation_identity.py"
 
 
 class WorkflowContractTests(unittest.TestCase):
+    def test_exact_eu_staging_metadata_repair_is_bounded_and_conditional(self):
+        path = WORKFLOWS / "repair-eu-staging-metadata.yml"
+        self.assertTrue(path.exists(), "the reviewed one-time repair workflow is missing")
+        workflow = path.read_text(encoding="utf-8")
+
+        for expected in (
+            "workflow_commit:",
+            "if: github.ref == 'refs/heads/main'",
+            "environment: production",
+            "group: lex-production",
+            "id-token: write",
+            "contents: read",
+            "WORKFLOW_COMMIT: ${{ github.sha }}",
+            "EXPECTED_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}",
+            "staging/eu-eurlex/cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c",
+            'DB_OLD_ETAG: "0x8DEFAB361991E14"',
+            'VECTORS_OLD_ETAG: "0x8DEFAB361980DD4"',
+            "f827e089bddff64709926af4341bc0ddbfbef829a5c3e29400754aec3b649fd9",
+            "fb600d1221ab108f5f55f287682844b9f2fa03308c5401ed7d9488ae2544b6ad",
+            "ARTICLES_GENERATION_SHA256: 6a2fb2647dea3ba0b3391e40a0612073c626ef0966bd816cdb8b99b57135c8da",
+            "articles_generation_sha256=$ARTICLES_GENERATION_SHA256",
+            "application/vnd.sqlite3",
+            "az storage blob metadata update",
+            "az storage blob update",
+            "--if-match",
+            "az storage blob download",
+            "sha256sum",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, workflow)
+
+        self.assertIn("exact two-blob inventory", workflow)
+        self.assertIn("legacy staging snapshot changed", workflow)
+        self.assertIn("post-repair staging snapshot is not canonical", workflow)
+        self.assertIn("post-repair byte hash differs", workflow)
+        self.assertNotRegex(
+            workflow,
+            r"\b(?:db|vectors)_etag=\$\(repair_blob\b",
+            "repair_blob must run directly so Bash errexit is not cleared by command substitution",
+        )
+        self.assertIn(
+            'application/vnd.sqlite3 db db_etag',
+            workflow,
+        )
+        self.assertIn(
+            '"$VECTORS_SIZE" application/octet-stream vectors vectors_etag',
+            workflow,
+        )
+        self.assertIn('printf -v "$result_name" \'%s\' "$etag"', workflow)
+        self.assertEqual(6, workflow.count("az storage blob "))
+        self.assertEqual(
+            workflow.count("az storage blob "),
+            workflow.count("--auth-mode login"),
+            "every Blob data-plane command must use OIDC login rather than key fallback",
+        )
+        self.assertEqual(3, workflow.count("--if-match"))
+        for conditional_command in (
+            "az storage blob download",
+            "az storage blob metadata update",
+            "az storage blob update",
+        ):
+            with self.subTest(conditional_command=conditional_command):
+                self.assertRegex(
+                    workflow,
+                    rf"(?s){re.escape(conditional_command)}"
+                    rf"(?:(?!\n\s*az storage blob ).)*?--if-match",
+                    f"{conditional_command} must be ETag-conditional",
+                )
+        for forbidden in (
+            "--auth-mode key",
+            "--account-key",
+            "--sas-token",
+            "az storage blob upload",
+            "az storage blob delete",
+            "az storage blob copy",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, workflow)
+
     def test_external_actions_are_pinned_to_full_commits(self):
         action = re.compile(r"^\s*-?\s*uses:\s*([^\s#]+)", re.MULTILINE)
         invalid = []
