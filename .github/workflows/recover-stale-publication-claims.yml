@@ -1,7 +1,7 @@
 name: one-time recover stale publication claims
 
-# One-time recovery for the exact claims left by failed runs 31902129511 and
-# 31902130547. Both target releases are proven absent. Remove this after audited use.
+# One-time recovery for the exact EU claim left by failed run 31904321452.
+# Preserve its exact draft release and tag. Remove this after audited use.
 on:
   workflow_dispatch:
     inputs:
@@ -25,12 +25,8 @@ jobs:
       github.repository == 'SFHAJJI/lex-ops' &&
       github.ref == 'refs/heads/main' &&
       github.sha == inputs.workflow_commit
-    strategy:
-      fail-fast: false
-      matrix:
-        publisher: [eu-eurlex, lu-legilux]
     concurrency:
-      group: publish-prebuilt-${{ matrix.publisher }}
+      group: publish-prebuilt-eu-eurlex
       cancel-in-progress: false
     environment: production
     runs-on: ubuntu-latest
@@ -49,7 +45,7 @@ jobs:
           GH_TOKEN: ${{ secrets.LEX_OPS_TOKEN }}
           EXPECTED_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
           WORKFLOW_COMMIT: ${{ github.sha }}
-          PUBLISHER: ${{ matrix.publisher }}
+          PUBLISHER: eu-eurlex
         run: |
           set -euo pipefail
 
@@ -57,66 +53,40 @@ jobs:
           readonly EXPECTED_SUBSCRIPTION=7c1e98f3-ef6e-45a0-b61b-a51d436bf093
           readonly STORAGE_ACCOUNT=stlexindexes
           readonly STORAGE_CONTAINER=lex
-          readonly FAILED_WORKFLOW_COMMIT=699972bdf5c288e0cd3abb0cb1da93493506f8c6
+          readonly FAILED_WORKFLOW_COMMIT=f6dbe64d2f6825517090f9b40117be66dd54a02f
           readonly FAILED_WORKFLOW_PATH=.github/workflows/publish-prebuilt-index.yml
           readonly API=https://api.github.com
           readonly ARTICLES_COMMIT=ac8851147534b9addfa2231c4364cbd785065841
           readonly ARTICLES_GENERATION=6a2fb2647dea3ba0b3391e40a0612073c626ef0966bd816cdb8b99b57135c8da
           readonly BUILD_CODE_COMMIT=27f0e02cb0da8e0fdf9f8322d3eef3b3ae09c776
           readonly work_root="$RUNNER_TEMP/exact-stale-claim-cleanup-$PUBLISHER"
+          readonly PUBLISHER
           mkdir -p "$work_root"
 
-          case "$PUBLISHER" in
-            eu-eurlex)
-              readonly RUN_ID=31902129511 RUN_NUMBER=13
-              readonly RUN_CREATED=2026-08-15T18:48:13Z RUN_UPDATED=2026-08-15T18:53:30Z
-              readonly CLAIM_NAME=publication-runs/eu-eurlex/cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c.json
-              readonly CLAIM_ETAG=0x8DEFAFDD62336EF
-              readonly CLAIM_SHA256=2c877aef5c6f93d9b3a377bf1f8dfb4dbbe7ca0d1d135716c3c8e999bd0efef8
-              readonly CLAIM_SIZE=702 CLAIM_MD5='XBGh2Qb9qfWmuCpb6uA2/w=='
-              readonly CLAIM_JSON='{"publisher":"eu-eurlex","queue_commit":"49eea0112f42f5e6676f3b0a29d498f07f78c9d3","queue_ticket_id":"cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c","repository":"SFHAJJI/lex-ops","run_id":"31902129511","schema":"lex-prebuilt-publication-run/1","staging":{"index":{"etag":"0x8DEFAEA3A7D4D33","sha256":"f827e089bddff64709926af4341bc0ddbfbef829a5c3e29400754aec3b649fd9","size":589156352},"vectors":{"etag":"0x8DEFAEC4628DF51","sha256":"fb600d1221ab108f5f55f287682844b9f2fa03308c5401ed7d9488ae2544b6ad","size":140342576}},"staging_prefix":"staging/eu-eurlex/cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c","workflow_commit":"699972bdf5c288e0cd3abb0cb1da93493506f8c6"}'
-              readonly POINTER_NAME=current/eu-eurlex.json POINTER_ETAG=0x8DEF9C349323805
-              readonly POINTER_SHA256=a460020a374eaeb7adbcd87fdbeaeb231055e9efd4767422c5940a3f9cf842dc
-              readonly POINTER_SIZE=363 POINTER_MD5='J0B7DCbIW+o8iPJi60mFMQ=='
-              readonly TICKET=cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c
-              readonly PREFIX=staging/eu-eurlex/cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c
-              readonly DB_NAME=$PREFIX/index-eu-eurlex.db DB_ETAG=0x8DEFAEA3A7D4D33
-              readonly DB_SHA256=f827e089bddff64709926af4341bc0ddbfbef829a5c3e29400754aec3b649fd9
-              readonly DB_SIZE=589156352
-              readonly VECTORS_NAME=$PREFIX/index-eu-eurlex.vectors VECTORS_ETAG=0x8DEFAEC4628DF51
-              readonly VECTORS_SHA256=fb600d1221ab108f5f55f287682844b9f2fa03308c5401ed7d9488ae2544b6ad
-              readonly VECTORS_SIZE=140342576 VECTORS_MD5='ZzhDHADQX2tUFEJ3YPrRNg=='
-              readonly CORPUS_COMMIT=e9c4df0981c855855a1a28218cf086ddeb5bb691
-              readonly CORPUS_REPO=SFHAJJI/lex-corpus-eu-eurlex
-              readonly TARGET_TAG=index-eu-eurlex-cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c
-              ;;
-            lu-legilux)
-              readonly RUN_ID=31902130547 RUN_NUMBER=14
-              readonly RUN_CREATED=2026-08-15T18:48:14Z RUN_UPDATED=2026-08-15T18:52:26Z
-              readonly CLAIM_NAME=publication-runs/lu-legilux/f2d4c2ed2b673f9db4abda429ba1451c3be80a4344ab589c86b1a7f29d39819c.json
-              readonly CLAIM_ETAG=0x8DEFAFDD8D052CB
-              readonly CLAIM_SHA256=bd48e8d26cb8213edacb8e1622334d83a092e88ea350ef8cd69b67be732e07bc
-              readonly CLAIM_SIZE=703 CLAIM_MD5='7ganAbUNzzfOhJVRWK9eEA=='
-              readonly CLAIM_JSON='{"publisher":"lu-legilux","queue_commit":"4fe7a312aaca42622f81e9c046ddd272660d4d1e","queue_ticket_id":"f2d4c2ed2b673f9db4abda429ba1451c3be80a4344ab589c86b1a7f29d39819c","repository":"SFHAJJI/lex-ops","run_id":"31902130547","schema":"lex-prebuilt-publication-run/1","staging":{"index":{"etag":"0x8DEFAB4AEE3239C","sha256":"fd404e736c29c4d19174ceb2c14667a80270409d222053fee79f0e25e910c0fa","size":717422592},"vectors":{"etag":"0x8DEFAB4AB09F1A2","sha256":"4a4d5fae77d72e74e4c295eb119f15add988cda6fce85b470ca1eb3873b2294b","size":46831856}},"staging_prefix":"staging/lu-legilux/f2d4c2ed2b673f9db4abda429ba1451c3be80a4344ab589c86b1a7f29d39819c","workflow_commit":"699972bdf5c288e0cd3abb0cb1da93493506f8c6"}'
-              readonly POINTER_NAME=current/lu-legilux.json POINTER_ETAG=0x8DEF94A869B8C85
-              readonly POINTER_SHA256=6b25b34ab4e773c9f7b417183dc04dcc813c60ed96571fe636818d914aa215c0
-              readonly POINTER_SIZE=365 POINTER_MD5='k1k8adYTO+gQy1R4TxD6gw=='
-              readonly TICKET=f2d4c2ed2b673f9db4abda429ba1451c3be80a4344ab589c86b1a7f29d39819c
-              readonly PREFIX=staging/lu-legilux/f2d4c2ed2b673f9db4abda429ba1451c3be80a4344ab589c86b1a7f29d39819c
-              readonly DB_NAME=$PREFIX/index-lu-legilux.db DB_ETAG=0x8DEFAB4AEE3239C
-              readonly DB_SHA256=fd404e736c29c4d19174ceb2c14667a80270409d222053fee79f0e25e910c0fa
-              readonly DB_SIZE=717422592
-              readonly VECTORS_NAME=$PREFIX/index-lu-legilux.vectors VECTORS_ETAG=0x8DEFAB4AB09F1A2
-              readonly VECTORS_SHA256=4a4d5fae77d72e74e4c295eb119f15add988cda6fce85b470ca1eb3873b2294b
-              readonly VECTORS_SIZE=46831856 VECTORS_MD5='7UMDe3s4HlrjzNYQuoJZoA=='
-              readonly CORPUS_COMMIT=c087f9153a8cde5429965ffa897db001f3acdf09
-              readonly CORPUS_REPO=SFHAJJI/lex-corpus-lu-legilux
-              readonly TARGET_TAG=index-lu-legilux-f2d4c2ed2b673f9db4abda429ba1451c3be80a4344ab589c86b1a7f29d39819c
-              ;;
-            *) echo "ERROR: unsupported one-time cleanup publisher: $PUBLISHER" >&2; exit 1 ;;
-          esac
-
-          readonly RELEASE_URL=$API/repos/$CORPUS_REPO/releases/tags/$TARGET_TAG
+          readonly RUN_ID=31904321452 RUN_NUMBER=15
+          readonly RUN_CREATED=2026-08-15T19:35:01Z RUN_UPDATED=2026-08-15T19:44:16Z
+          readonly CLAIM_NAME=publication-runs/eu-eurlex/cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c.json
+          readonly CLAIM_ETAG=0x8DEFB04623F633A
+          readonly CLAIM_SHA256=89d6b103a541a4c24abd50a51ddbe1d5ac6e23668feb4490499e34f994e063fc
+          readonly CLAIM_SIZE=702 CLAIM_MD5='wr9yrcvM5IlyzKROYMSX5A=='
+          readonly CLAIM_JSON='{"publisher":"eu-eurlex","queue_commit":"49eea0112f42f5e6676f3b0a29d498f07f78c9d3","queue_ticket_id":"cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c","repository":"SFHAJJI/lex-ops","run_id":"31904321452","schema":"lex-prebuilt-publication-run/1","staging":{"index":{"etag":"0x8DEFAEA3A7D4D33","sha256":"f827e089bddff64709926af4341bc0ddbfbef829a5c3e29400754aec3b649fd9","size":589156352},"vectors":{"etag":"0x8DEFAEC4628DF51","sha256":"fb600d1221ab108f5f55f287682844b9f2fa03308c5401ed7d9488ae2544b6ad","size":140342576}},"staging_prefix":"staging/eu-eurlex/cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c","workflow_commit":"f6dbe64d2f6825517090f9b40117be66dd54a02f"}'
+          readonly POINTER_NAME=current/eu-eurlex.json POINTER_ETAG=0x8DEF9C349323805
+          readonly POINTER_SHA256=a460020a374eaeb7adbcd87fdbeaeb231055e9efd4767422c5940a3f9cf842dc
+          readonly POINTER_SIZE=363 POINTER_MD5='J0B7DCbIW+o8iPJi60mFMQ=='
+          readonly TICKET=cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c
+          readonly PREFIX=staging/eu-eurlex/cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c
+          readonly DB_NAME=$PREFIX/index-eu-eurlex.db DB_ETAG=0x8DEFAEA3A7D4D33
+          readonly DB_SHA256=f827e089bddff64709926af4341bc0ddbfbef829a5c3e29400754aec3b649fd9
+          readonly DB_SIZE=589156352
+          readonly VECTORS_NAME=$PREFIX/index-eu-eurlex.vectors VECTORS_ETAG=0x8DEFAEC4628DF51
+          readonly VECTORS_SHA256=fb600d1221ab108f5f55f287682844b9f2fa03308c5401ed7d9488ae2544b6ad
+          readonly VECTORS_SIZE=140342576 VECTORS_MD5='ZzhDHADQX2tUFEJ3YPrRNg=='
+          readonly CORPUS_COMMIT=e9c4df0981c855855a1a28218cf086ddeb5bb691
+          readonly CORPUS_REPO=SFHAJJI/lex-corpus-eu-eurlex
+          readonly TARGET_TAG=index-eu-eurlex-cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c
+          readonly RELEASE_ID=371139989 RELEASE_NAME='index-eu-eurlex cc6890caa445'
+          readonly RELEASE_BODY=$'Signed index, benchmark activation evidence, and whole-release manifest.\n\nSemantic activation: false\nRuntime quarantine guard: 03f94295f3e678b47cb0511a082698f34373679c'
+          readonly RELEASE_URL=$API/repos/$CORPUS_REPO/releases/$RELEASE_ID
           readonly TAG_URL=$API/repos/$CORPUS_REPO/git/ref/tags/$TARGET_TAG
 
           die() { echo "ERROR: $*" >&2; exit 1; }
@@ -142,28 +112,13 @@ jobs:
             [ "$status" = 200 ] || die "GitHub GET expected HTTP 200 for $url, got $status"
           }
 
-          require_github_404() {
-            local url="$1" output="$2" status
-            if ! status=$(curl --proto '=https' --tlsv1.2 --silent --show-error \
-                --retry 4 --retry-all-errors --connect-timeout 10 --max-time 60 \
-                --header "Authorization: Bearer $GH_TOKEN" \
-                --header 'Accept: application/vnd.github+json' \
-                --header 'X-GitHub-Api-Version: 2026-03-10' \
-                --output "$output" --write-out '%{http_code}' "$url"); then
-              die "GitHub absence check failed for $url"
-            fi
-            [ "$status" = 404 ] || die "expected exact HTTP 404 for $url, got $status"
-            jq -e '.message == "Not Found"' "$output" >/dev/null \
-              || die "HTTP 404 body was not GitHub Not Found for $url"
-          }
-
           verify_failed_run() {
             local output="$work_root/failed-run.json"
             github_get "$API/repos/$EXPECTED_REPOSITORY/actions/runs/$RUN_ID" "$output"
             jq -e --argjson id "$RUN_ID" --argjson number "$RUN_NUMBER" \
               --arg head "$FAILED_WORKFLOW_COMMIT" --arg path "$FAILED_WORKFLOW_PATH" \
               --arg created "$RUN_CREATED" --arg updated "$RUN_UPDATED" '
-                .id == $id and .run_number == $number and .run_attempt == 1
+                .id == $id and .run_number == $number and .run_attempt == 2
                 and .workflow_id == 329614049
                 and .name == "publish-prebuilt-index"
                 and .path == $path and .event == "workflow_dispatch"
@@ -173,34 +128,46 @@ jobs:
               ' "$output" >/dev/null || die "failed run $RUN_ID no longer has the frozen identity"
           }
 
-          verify_public_target_absent() {
-            local phase repository
+          verify_exact_draft_and_tag() {
+            local phase repository release locator tag_ref owner name query
             phase="$1"
             repository="$work_root/$phase-repository.json"
+            release="$work_root/$phase-draft-release.json"
+            locator="$work_root/$phase-draft-locator.json"
+            tag_ref="$work_root/$phase-tag-ref.json"
+            owner="${CORPUS_REPO%%/*}"
+            name="${CORPUS_REPO#*/}"
+            [ -n "$owner" ] && [ -n "$name" ] && [ "$CORPUS_REPO" = "$owner/$name" ] \
+              && [[ "$name" != */* ]] || die "invalid corpus repository identity"
             github_get "$API/repos/$CORPUS_REPO" "$repository"
             jq -e --arg repo "$CORPUS_REPO" '
                 .full_name == $repo and .private == false and .visibility == "public"
                 and .archived == false and .default_branch == "main"
               ' "$repository" >/dev/null || die "publisher repository identity changed"
-            require_github_404 "$RELEASE_URL" "$work_root/$phase-release.404.json"
-            require_github_404 "$TAG_URL" "$work_root/$phase-tag.404.json"
-          }
-
-          verify_draft_absent() {
-            local phase="$1"
-            local output="$work_root/$phase-draft-locator.json"
-            local owner="${CORPUS_REPO%%/*}" name="${CORPUS_REPO#*/}" query
-            [ -n "$owner" ] && [ -n "$name" ] && [ "$CORPUS_REPO" = "$owner/$name" ] \
-              && [[ "$name" != */* ]] || die "invalid corpus repository identity"
+            github_get "$RELEASE_URL" "$release"
+            jq -e --argjson id "$RELEASE_ID" --arg tag "$TARGET_TAG" \
+              --arg target "$CORPUS_COMMIT" --arg name "$RELEASE_NAME" \
+              --arg body "$RELEASE_BODY" '
+                .id == $id and .tag_name == $tag and .target_commitish == $target
+                and .name == $name and .body == $body
+                and .draft == true and .prerelease == false and .immutable == false
+                and .published_at == null and .assets == []
+              ' "$release" >/dev/null || die "exact draft release identity changed"
             query='query($owner:String!,$name:String!,$tag:String!){repository(owner:$owner,name:$name){nameWithOwner release(tagName:$tag){databaseId tagName}}}'
             gh api graphql -f query="$query" -f owner="$owner" -f name="$name" \
-              -f tag="$TARGET_TAG" > "$output" \
-              || die "authenticated draft absence query failed"
-            jq -e --arg repo "$CORPUS_REPO" '
+              -f tag="$TARGET_TAG" > "$locator" \
+              || die "authenticated draft lookup failed"
+            jq -e --arg repo "$CORPUS_REPO" --argjson id "$RELEASE_ID" \
+              --arg tag "$TARGET_TAG" '
                 ((.errors // []) == []) and .data.repository.nameWithOwner == $repo
                 and (.data.repository | has("release"))
-                and .data.repository.release == null
-              ' "$output" >/dev/null || die "target release exists or its absence is ambiguous"
+                and .data.repository.release.databaseId == $id
+                and .data.repository.release.tagName == $tag
+              ' "$locator" >/dev/null || die "draft lookup is absent or ambiguous"
+            github_get "$TAG_URL" "$tag_ref"
+            jq -e --arg ref "refs/tags/$TARGET_TAG" --arg sha "$CORPUS_COMMIT" '
+                .ref == $ref and .object.type == "commit" and .object.sha == $sha
+              ' "$tag_ref" >/dev/null || die "exact tag ref identity changed"
           }
 
           verify_claim() {
@@ -329,8 +296,7 @@ jobs:
           prove_claim_absent() {
             local exists
             case "$CLAIM_NAME" in
-              publication-runs/eu-eurlex/cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c.json|\
-              publication-runs/lu-legilux/f2d4c2ed2b673f9db4abda429ba1451c3be80a4344ab589c86b1a7f29d39819c.json) ;;
+              publication-runs/eu-eurlex/cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c.json) ;;
               *) die "invalid claim proof target: $CLAIM_NAME" ;;
             esac
             if ! exists=$(az storage blob exists --auth-mode login --only-show-errors \
@@ -344,8 +310,7 @@ jobs:
           delete_claim() {
             local observed
             case "$CLAIM_NAME:$CLAIM_ETAG" in
-              publication-runs/eu-eurlex/cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c.json:0x8DEFAFDD62336EF|\
-              publication-runs/lu-legilux/f2d4c2ed2b673f9db4abda429ba1451c3be80a4344ab589c86b1a7f29d39819c.json:0x8DEFAFDD8D052CB) ;;
+              publication-runs/eu-eurlex/cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c.json:0x8DEFB04623F633A) ;;
               *) die "refusing non-allowlisted claim deletion: $CLAIM_NAME" ;;
             esac
             if ! observed=$(az storage blob show --auth-mode login --only-show-errors \
@@ -374,8 +339,7 @@ jobs:
             || die "OIDC login selected another Azure subscription"
 
           verify_failed_run
-          verify_public_target_absent before
-          verify_draft_absent before
+          verify_exact_draft_and_tag before
           claim_state=
           inspect_claim claim_state
           verify_pointer before
@@ -387,8 +351,7 @@ jobs:
             *) die "invalid inspected claim state: $claim_state" ;;
           esac
 
-          verify_public_target_absent after
-          verify_draft_absent after
+          verify_exact_draft_and_tag after
           verify_pointer after
           verify_staging_snapshot
           prove_claim_absent
@@ -397,9 +360,9 @@ jobs:
             echo "### One-time exact failed-publication cleanup: $PUBLISHER verified"
             echo
             echo "- Failed run: \`$RUN_ID\`, head \`$FAILED_WORKFLOW_COMMIT\`, path \`$FAILED_WORKFLOW_PATH\`, conclusion \`failure\`."
-            echo '- Authenticated GraphQL proved the target release absent before and after cleanup.'
+            echo '- Authenticated REST and GraphQL pinned the exact draft release before and after cleanup.'
             echo "- Frozen claim initial state: \`$claim_state\`; final state: \`absent\`."
             echo "- Claim: \`$CLAIM_NAME\`, ETag \`$CLAIM_ETAG\`, SHA-256 \`$CLAIM_SHA256\`."
-            echo '- Postflight re-proved the release, public release-by-tag, tag ref, and claim absent; pointer and staged bytes remained exact.'
+            echo '- Postflight re-proved the exact draft, tag ref, and claim absent; pointer bytes remained exact; staged inventory, metadata, sizes, and ETags remained exact.'
             echo '- The only possible write was conditional deletion of the allowlisted claim by exact ETag.'
           } >> "$GITHUB_STEP_SUMMARY"
