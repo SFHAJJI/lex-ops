@@ -177,6 +177,16 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn('echo "PUBLIC_RETRY=true" >> "$GITHUB_ENV"', workflow)
         self.assertIn("and ([.assets[].name] | sort) == ($allowed | sort)", workflow)
 
+    def test_evaluation_publication_describes_project_owner_review_honestly(self):
+        workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn("project-owner review signature: verified", workflow)
+        self.assertNotIn("independent review signature: verified", workflow)
+        self.assertRegex(readme, r"verifies the project-owner review\s+signature")
+        self.assertNotRegex(readme, r"verifies the independent human\s+review")
+        self.assertIn("Promotion independently revalidates this package", workflow)
+
     @staticmethod
     def report():
         return {
