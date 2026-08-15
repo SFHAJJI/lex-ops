@@ -1,6 +1,7 @@
 # Verify and publish one exact immutable GitHub release bundle; sourced by the orchestrator.
 verify_receipt_header() {
-  local root="$1" receipt="$root/$cleanup_receipt" receipt_manifest="$root/$cleanup_manifest"
+  local root="$1"
+  local receipt="$root/$cleanup_receipt" receipt_manifest="$root/$cleanup_manifest"
   local receipt_signature="$root/$cleanup_signature" canonical_assets_json
   local -a canonical_assets=("$index" "$vectors" model-manifest.json model.onnx \
     sentencepiece.bpe.model "$benchmark" "$benchmark_manifest" "$benchmark_signature" \
@@ -236,7 +237,8 @@ ensure_exact_tag() {
 }
 
 write_asset_inventory() {
-  local root="$1" output="$2" item="$output.items" asset
+  local root="$1" output="$2" asset
+  local item="$output.items"
   : > "$item"
   while IFS= read -r asset; do
     [ -f "$root/$asset" ] || return 1

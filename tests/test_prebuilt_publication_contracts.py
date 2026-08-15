@@ -643,6 +643,257 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
                 '! validate_draft_inventory "$UNKNOWN" "$EXPECTED" true\n', check=False)
             self.assertEqual(0, completed.returncode, completed.stderr)
 
+    def test_asset_inventory_is_safe_under_nounset(self):
+        bash = Path(r"C:\Program Files\Git\bin\bash.exe") if sys.platform == "win32" else Path("/bin/bash")
+        if not bash.exists():
+            self.skipTest("bash is required")
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            root = Path(temporary)
+            environment = os.environ.copy()
+            environment.update({
+                "RELEASE_SCRIPT": RELEASE.as_posix(),
+                "TEST_ROOT": root.as_posix(),
+            })
+            completed = subprocess.run(
+                [str(bash)], env=environment, text=True, capture_output=True, check=False,
+                input=r'''set -euo pipefail
+. "$RELEASE_SCRIPT"
+expected_assets_json="$TEST_ROOT/expected.json"
+printf '[]\n' > "$expected_assets_json"
+jq() {
+  case "$1" in
+    -r) return 0 ;;
+    -s) printf '[]\n' ;;
+    -Rsc) cat >/dev/null; printf '[]\n' ;;
+    *) return 1 ;;
+  esac
+}
+write_asset_inventory "$TEST_ROOT" "$TEST_ROOT/inventory.json"
+[ "$(cat "$TEST_ROOT/inventory.json")" = '[]' ]
+cleanup_receipt=receipt.json
+cleanup_manifest=receipt.manifest.json
+cleanup_signature=receipt.manifest.sig
+index=index.db
+vectors=index.vectors
+benchmark=benchmark.json
+benchmark_manifest=benchmark.manifest.json
+benchmark_signature=benchmark.manifest.sig
+manifest=index.manifest.json
+signature=index.manifest.sig
+PUBLISHER=lu-legilux
+lex_root="$TEST_ROOT/lex"
+single_trust_roots="$TEST_ROOT/trust.json"
+dotnet() { : > "$TEST_ROOT/dotnet-called"; return 1; }
+if verify_receipt_header "$TEST_ROOT"; then exit 1; fi
+[ -f "$TEST_ROOT/dotnet-called" ]
+''')
+            self.assertEqual(0, completed.returncode, completed.stderr)
+
+    def test_graphql_draft_locator_reuses_existing_and_proves_absence(self):
+        bash = Path(r"C:\Program Files\Git\bin\bash.exe") if sys.platform == "win32" else Path("/bin/bash")
+        if not bash.exists() or subprocess.run(
+            [str(bash)], input="command -v jq >/dev/null", text=True, check=False
+        ).returncode:
+            self.skipTest("bash with jq is required")
+
+        tag = "index-eu-eurlex-test"
+        corpus = "1" * 40
+        ticket = "2" * 64
+        release = lambda release_id: {
+            "id": release_id,
+            "tag_name": tag,
+            "target_commitish": corpus,
+            "name": f"index-eu-eurlex {ticket[:12]}",
+            "body": "notes",
+            "published_at": None,
+            "draft": True,
+            "prerelease": False,
+            "immutable": False,
+            "assets": [],
+        }
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            root = Path(temporary)
+            fixtures = {
+                "PRESENT": root / "present.json",
+                "ABSENT": root / "absent.json",
+                "RELEASE_37": root / "release-37.json",
+                "RELEASE_38": root / "release-38.json",
+            }
+            fixtures["PRESENT"].write_text(json.dumps({"data": {"repository": {
+                "nameWithOwner": "SFHAJJI/lex-corpus-eu-eurlex",
+                "release": {"databaseId": 37, "tagName": tag},
+            }}}), encoding="utf-8")
+            fixtures["ABSENT"].write_text(json.dumps({"data": {"repository": {
+                "nameWithOwner": "SFHAJJI/lex-corpus-eu-eurlex", "release": None,
+            }}}), encoding="utf-8")
+            fixtures["RELEASE_37"].write_text(json.dumps(release(37)), encoding="utf-8")
+            fixtures["RELEASE_38"].write_text(json.dumps(release(38)), encoding="utf-8")
+            environment = os.environ.copy()
+            environment.update({key: value.as_posix() for key, value in fixtures.items()})
+            environment.update({
+                "MOCK_LOG": (root / "calls.log").as_posix(),
+                "RELEASE_SCRIPT": RELEASE.as_posix(),
+                "TEST_ROOT": root.as_posix(),
+            })
+            completed = subprocess.run(
+                [str(bash)], env=environment, text=True, capture_output=True, check=False,
+                input=r'''set -euo pipefail
+. "$RELEASE_SCRIPT"
+case ${OSTYPE:-} in msys*) jq() { jq.exe "$@" | tr -d '\r'; } ;; esac
+work_root=$TEST_ROOT
+repo=SFHAJJI/lex-corpus-eu-eurlex
+tag=index-eu-eurlex-test
+CORPUS_COMMIT=1111111111111111111111111111111111111111
+PUBLISHER=eu-eurlex
+ticket_id=2222222222222222222222222222222222222222222222222222222222222222
+release_notes=notes
+require_github_immutable_releases() { :; }
+write_asset_inventory() { printf '[]\n' > "$2"; }
+ensure_exact_tag() { :; }
+upload_missing_assets() { :; }
+download_github_bundle() { :; }
+gh_api() {
+  printf '%s\n' "$*" >> "$MOCK_LOG"
+  if [ "$1" = graphql ]; then
+    if [ "$MODE" = existing ]; then cat "$PRESENT"; else cat "$ABSENT"; fi
+  elif [ "$1" = --method ] && [ "$2" = POST ]; then
+    [ "$MODE" = absent ] || return 91
+    printf '{"id":38}\n'
+  elif [ "$1" = repos/SFHAJJI/lex-corpus-eu-eurlex/releases/37 ]; then
+    cat "$RELEASE_37"
+  elif [ "$1" = repos/SFHAJJI/lex-corpus-eu-eurlex/releases/38 ]; then
+    cat "$RELEASE_38"
+  else
+    return 92
+  fi
+}
+
+MODE=existing
+release_id=
+: > "$MOCK_LOG"
+prepare_exact_draft "$TEST_ROOT"
+[ "$release_id" = 37 ]
+! grep -q -- '--method POST' "$MOCK_LOG"
+
+MODE=absent
+release_id=
+: > "$MOCK_LOG"
+prepare_exact_draft "$TEST_ROOT"
+[ "$release_id" = 38 ]
+[ "$(grep -c -- '--method POST' "$MOCK_LOG")" = 1 ]
+''')
+            self.assertEqual(0, completed.returncode, completed.stderr)
+
+    def test_draft_asset_uploads_require_exact_numeric_id_readback(self):
+        bash = Path(r"C:\Program Files\Git\bin\bash.exe") if sys.platform == "win32" else Path("/bin/bash")
+        if not bash.exists() or subprocess.run(
+            [str(bash)], input="command -v jq >/dev/null", text=True, check=False
+        ).returncode:
+            self.skipTest("bash with jq is required")
+
+        digest = "a" * 64
+        base = {
+            "id": 7,
+            "tag_name": "index-lu-legilux-test",
+            "target_commitish": "1" * 40,
+            "name": "index-lu-legilux " + "2" * 12,
+            "body": "notes",
+            "published_at": None,
+            "draft": True,
+            "prerelease": False,
+            "immutable": False,
+        }
+        exact_asset = {
+            "id": 11, "name": "asset.bin", "state": "uploaded",
+            "digest": "sha256:" + digest, "size": 3,
+        }
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            root = Path(temporary)
+            fixtures = {
+                "EXPECTED": [{"name": "asset.bin", "sha256": digest, "size": 3}],
+                "EMPTY": {**base, "assets": []},
+                "EXACT": {**base, "assets": [exact_asset]},
+                "UNKNOWN": {**base, "assets": [{**exact_asset, "name": "unknown.bin"}]},
+                "DUPLICATE": {**base, "assets": [exact_asset, exact_asset]},
+                "WRONG": {**base, "assets": [{**exact_asset, "digest": "sha256:" + "b" * 64}]},
+                "STARTER": {**base, "assets": [{**exact_asset, "state": "starter"}]},
+            }
+            paths = {}
+            for name, fixture in fixtures.items():
+                paths[name] = root / f"{name.lower()}.json"
+                paths[name].write_text(json.dumps(fixture), encoding="utf-8")
+            (root / "asset.bin").write_bytes(b"abc")
+            environment = os.environ.copy()
+            environment.update({key: value.as_posix() for key, value in paths.items()})
+            environment.update({
+                "MOCK_LOG": (root / "calls.log").as_posix(),
+                "RELEASE_SCRIPT": RELEASE.as_posix(),
+                "TEST_ROOT": root.as_posix(),
+            })
+            completed = subprocess.run(
+                [str(bash)], env=environment, text=True, capture_output=True, check=False,
+                input=r'''set -euo pipefail
+. "$RELEASE_SCRIPT"
+case ${OSTYPE:-} in msys*) jq() { jq.exe "$@" | tr -d '\r'; } ;; esac
+work_root=$TEST_ROOT
+repo=SFHAJJI/lex-corpus-lu-legilux
+tag=index-lu-legilux-test
+CORPUS_COMMIT=1111111111111111111111111111111111111111
+PUBLISHER=lu-legilux
+ticket_id=2222222222222222222222222222222222222222222222222222222222222222
+release_notes=notes
+release_id=7
+GH_TOKEN=test-token
+fetch_count=0
+gh_api() {
+  [ "$1" = repos/SFHAJJI/lex-corpus-lu-legilux/releases/7 ] || return 90
+  printf '%s\n' "$1" >> "$MOCK_LOG"
+  fetch_count=$((fetch_count + 1))
+  case "$MODE:$fetch_count" in
+    existing:*) cat "$EXACT" ;;
+    missing:1|ambiguous:1|ambiguous_absent:*) cat "$EMPTY" ;;
+    missing:*|ambiguous:*) cat "$EXACT" ;;
+    unknown:*) cat "$UNKNOWN" ;;
+    duplicate:*) cat "$DUPLICATE" ;;
+    wrong:*) cat "$WRONG" ;;
+    starter:*) cat "$STARTER" ;;
+    *) return 91 ;;
+  esac
+}
+curl() {
+  printf 'curl %s\n' "$*" >> "$MOCK_LOG"
+  if [ "$MODE" = ambiguous ] || [ "$MODE" = ambiguous_absent ]; then return 56; fi
+  printf 201
+}
+
+MODE=existing; fetch_count=0; : > "$MOCK_LOG"
+upload_missing_assets "$TEST_ROOT" "$EXPECTED"
+[ "$(grep -c '^repos/SFHAJJI/lex-corpus-lu-legilux/releases/7$' "$MOCK_LOG")" = 1 ]
+! grep -q '^curl ' "$MOCK_LOG"
+
+MODE=missing; fetch_count=0; : > "$MOCK_LOG"
+upload_missing_assets "$TEST_ROOT" "$EXPECTED"
+[ "$(grep -c '^repos/SFHAJJI/lex-corpus-lu-legilux/releases/7$' "$MOCK_LOG")" = 2 ]
+[ "$(grep -c '^curl ' "$MOCK_LOG")" = 1 ]
+
+MODE=ambiguous; fetch_count=0; : > "$MOCK_LOG"
+upload_missing_assets "$TEST_ROOT" "$EXPECTED" 2> "$TEST_ROOT/ambiguous.err"
+[ "$(grep -c '^repos/SFHAJJI/lex-corpus-lu-legilux/releases/7$' "$MOCK_LOG")" = 2 ]
+grep -q 'requiring exact numeric-ID read-back' "$TEST_ROOT/ambiguous.err"
+
+MODE=ambiguous_absent; fetch_count=0; : > "$MOCK_LOG"
+! upload_missing_assets "$TEST_ROOT" "$EXPECTED"
+[ "$(grep -c '^repos/SFHAJJI/lex-corpus-lu-legilux/releases/7$' "$MOCK_LOG")" = 2 ]
+
+for MODE in unknown duplicate wrong starter; do
+  fetch_count=0; : > "$MOCK_LOG"
+  ! upload_missing_assets "$TEST_ROOT" "$EXPECTED"
+  ! grep -q '^curl ' "$MOCK_LOG"
+done
+''')
+            self.assertEqual(0, completed.returncode, completed.stderr)
+
     def test_transient_draft_locator_failure_never_creates_a_release(self):
         bash = Path(r"C:\Program Files\Git\bin\bash.exe") if sys.platform == "win32" else Path("/bin/bash")
         if not bash.exists():
