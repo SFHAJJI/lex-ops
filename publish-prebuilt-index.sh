@@ -267,7 +267,7 @@ download_legacy_blob_conditionally() {
 
 authenticate_previous_pointer() {
   local pointer="$1" pointer_schema manifest_id prefix corpus previous_dir receipt_manifest_id
-  local previous_tag asset release_state tag_state
+  local previous_tag asset release_state tag_state legacy_manifest legacy_signature legacy_assets
   jq -e --arg pub "$PUBLISHER" '
       ((.schema == "lex-artifact-pointer/1"
         and (keys | sort) == ["collection","corpus_commit","manifest_sha256","prefix","published_at","schema"])
@@ -294,9 +294,25 @@ authenticate_previous_pointer() {
   previous_dir=$(mktemp -d) || return 1
   if [ "$pointer_schema" = lex-artifact-pointer/1 ]; then
     prefix=$(jq -er .prefix "$pointer") || return 1
-    download_legacy_blob_conditionally "$prefix/$cleanup_receipt" "$previous_dir/$cleanup_receipt" || return 1
-    download_legacy_blob_conditionally "$prefix/$cleanup_manifest" "$previous_dir/$cleanup_manifest" || return 1
-    download_legacy_blob_conditionally "$prefix/$cleanup_signature" "$previous_dir/$cleanup_signature" || return 1
+    legacy_manifest="index-$PUBLISHER.manifest.json"
+    legacy_signature="index-$PUBLISHER.manifest.sig"
+    download_legacy_blob_conditionally "$prefix/$legacy_manifest" \
+      "$previous_dir/$legacy_manifest" || return 1
+    download_legacy_blob_conditionally "$prefix/$legacy_signature" \
+      "$previous_dir/$legacy_signature" || return 1
+    legacy_assets=$(python3 "$ops_root/scripts/prebuilt_publication_contract.py" \
+      validate-legacy-pointer "$pointer" "$previous_dir/$legacy_manifest" "$PUBLISHER") \
+      || return 1
+    [ -n "$legacy_assets" ] || return 1
+    while IFS= read -r asset; do
+      [ -n "$asset" ] || return 1
+      download_legacy_blob_conditionally "$prefix/$asset" "$previous_dir/$asset" || return 1
+    done <<< "$legacy_assets"
+    dotnet run --project "$lex_root/src/Lex.Ingest" -c Release -- artifact verify \
+      --root "$previous_dir" --manifest "$previous_dir/$legacy_manifest" \
+      --signature "$previous_dir/$legacy_signature" --trust-roots "$single_trust_roots"
+    previous_corpus_commit="$corpus"
+    return 0
   else
     previous_tag=$(jq -er .release_tag "$pointer") || return 1
     release_state=$(gh_api "repos/$repo/releases/tags/$previous_tag") || return 1

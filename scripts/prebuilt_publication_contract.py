@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Pure validators for the prebuilt publication trust boundary."""
 
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -11,6 +12,32 @@ COMMIT = re.compile(r"^[0-9a-f]{40}$")
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
 ETAG = re.compile(r"^0x[0-9A-F]+$")
 TICKET = re.compile(r"^[0-9a-f]{64}$")
+
+LEGACY_POINTERS = {
+    "eu-eurlex": {
+        "manifest": "2da4d2039b549ced38afbd305f9625e1190bf2118f5f765eef30d36a0c45c0d5",
+        "pointer_sha": "a460020a374eaeb7adbcd87fdbeaeb231055e9efd4767422c5940a3f9cf842dc",
+        "corpus": "7595e12ba31920fe6229f707f13eb5b8effa05c7",
+        "published_at": "2026-08-14T04:29:37Z",
+        "created_at": "2026-08-14T04:32:59Z",
+        "files": [
+            "eu-scope.json", "eu-work-enrichment.json", "index-eu-eurlex.db",
+            "index-eu-eurlex.vectors", "model-manifest.json", "model.onnx",
+            "sentencepiece.bpe.model",
+        ],
+    },
+    "lu-legilux": {
+        "manifest": "bb5a115b01262fbe486bd7c9f66e0941910aaf35bd23ee17caf7447b89b8a308",
+        "pointer_sha": "6b25b34ab4e773c9f7b417183dc04dcc813c60ed96571fe636818d914aa215c0",
+        "corpus": "69a4bec429c5afd73261e6959ca42c9ca796d567",
+        "published_at": "2026-08-13T14:48:40Z",
+        "created_at": "2026-08-13T14:51:44Z",
+        "files": [
+            "index-lu-legilux.db", "index-lu-legilux.vectors",
+            "model-manifest.json", "model.onnx", "sentencepiece.bpe.model",
+        ],
+    },
+}
 
 
 def fail(message):
@@ -102,6 +129,77 @@ def validate_staging_snapshot(arguments):
 
 def validate_staging_cleanup_snapshot(arguments):
     validate_staging(arguments, allow_missing=True)
+
+
+def validate_legacy_pointer(arguments):
+    if len(arguments) != 3:
+        fail("usage: validate-legacy-pointer POINTER MANIFEST PUBLISHER")
+    pointer_path = Path(arguments[0])
+    pointer = read_json(pointer_path)
+    manifest_path = Path(arguments[1])
+    manifest = read_json(manifest_path)
+    publisher = arguments[2]
+    expected = LEGACY_POINTERS.get(publisher)
+    if expected is None:
+        fail("legacy pointer publisher is unsupported")
+    try:
+        pointer_bytes = pointer_path.read_bytes()
+        manifest_bytes = manifest_path.read_bytes()
+    except OSError as exception:
+        fail(f"cannot read legacy manifest bytes: {exception}")
+    if hashlib.sha256(pointer_bytes).hexdigest() != expected["pointer_sha"]:
+        fail("legacy pointer bytes are not the exact frozen locator")
+    if hashlib.sha256(manifest_bytes).hexdigest() != expected["manifest"]:
+        fail("legacy manifest bytes are not the exact frozen release")
+    expected_pointer = {
+        "schema": "lex-artifact-pointer/1",
+        "collection": publisher,
+        "manifest_sha256": expected["manifest"],
+        "prefix": f"releases/{publisher}/{expected['manifest']}",
+        "corpus_commit": expected["corpus"],
+        "published_at": expected["published_at"],
+    }
+    if pointer != expected_pointer:
+        fail("legacy pointer is not the exact frozen release locator")
+    expected_sources = {
+        "articles_commit": "f95da3e9ce88baebc99d4b3d307679feca8c1d50",
+        "build_origin": "hash-pinned-private-staging",
+        "collection": publisher,
+        "corpus_commit": expected["corpus"],
+        "publication_tool_commit": "51e33b406475fa7ff7014d21d94ef2ae1c3c3ed4",
+        "queue_commit": "7510ba2dccd3a99a02fb020faea2d074c43e1a54",
+    }
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != {
+            "algorithm", "code_commit", "created_at", "files", "key_id",
+            "schema", "sources",
+        }
+        or manifest.get("schema") != "lex-artifacts/1"
+        or manifest.get("algorithm") != "ECDSA-P256-SHA256"
+        or manifest.get("key_id") != "keyvault-lex-v2"
+        or manifest.get("code_commit") != "51e33b406475fa7ff7014d21d94ef2ae1c3c3ed4"
+        or manifest.get("created_at") != expected["created_at"]
+        or manifest.get("sources") != expected_sources
+        or not isinstance(manifest.get("files"), list)
+    ):
+        fail("legacy signed manifest identity is not exact")
+    files = manifest["files"]
+    if [item.get("path") for item in files if isinstance(item, dict)] != expected["files"]:
+        fail("legacy signed manifest inventory is not exact")
+    for item in files:
+        if (
+            set(item) != {"kind", "path", "sha256", "size"}
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", item["path"])
+            or not isinstance(item["kind"], str)
+            or not item["kind"]
+            or not isinstance(item["size"], int)
+            or item["size"] <= 0
+            or not isinstance(item["sha256"], str)
+            or not DIGEST.fullmatch(item["sha256"])
+        ):
+            fail("legacy signed manifest file entry is invalid")
+    print("\n".join(expected["files"]))
 
 
 def validate_lineage_receipt(arguments):
@@ -459,6 +557,7 @@ def validate_immutable_release_setting(arguments):
 COMMANDS = {
     "validate-benchmark": validate_benchmark,
     "validate-lineage-receipt": validate_lineage_receipt,
+    "validate-legacy-pointer": validate_legacy_pointer,
     "validate-staging-snapshot": validate_staging_snapshot,
     "validate-staging-cleanup-snapshot": validate_staging_cleanup_snapshot,
     "validate-release": validate_release,

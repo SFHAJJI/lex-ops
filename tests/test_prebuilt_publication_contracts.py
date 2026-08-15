@@ -407,6 +407,43 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
                     ).returncode,
                 )
 
+    def test_legacy_pointer_authentication_is_limited_to_exact_known_manifests(self):
+        for publisher in ("eu-eurlex", "lu-legilux"):
+            manifest, manifest_sha, corpus = self.legacy_manifest(publisher)
+            pointer = {
+                "schema": "lex-artifact-pointer/1",
+                "collection": publisher,
+                "manifest_sha256": manifest_sha,
+                "prefix": f"releases/{publisher}/{manifest_sha}",
+                "corpus_commit": corpus,
+                "published_at": (
+                    "2026-08-14T04:29:37Z"
+                    if publisher == "eu-eurlex"
+                    else "2026-08-13T14:48:40Z"
+                ),
+            }
+            completed = self.run_legacy_contract(pointer, manifest, publisher)
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertEqual(
+                [item["path"] for item in manifest["files"]],
+                completed.stdout.splitlines(),
+            )
+
+            for mutation in ("pointer_digest", "pointer_corpus", "manifest_file"):
+                changed_pointer = json.loads(json.dumps(pointer))
+                changed_manifest = json.loads(json.dumps(manifest))
+                if mutation == "pointer_digest":
+                    changed_pointer["manifest_sha256"] = "0" * 64
+                elif mutation == "pointer_corpus":
+                    changed_pointer["corpus_commit"] = "0" * 40
+                else:
+                    changed_manifest["files"][0]["size"] += 1
+                with self.subTest(publisher=publisher, mutation=mutation):
+                    rejected = self.run_legacy_contract(
+                        changed_pointer, changed_manifest, publisher
+                    )
+                    self.assertNotEqual(0, rejected.returncode)
+
     def test_workflow_and_script_close_every_release_blocker(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         script = expanded_publisher()
@@ -481,6 +518,26 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
         self.assertIn('--source "vectors_sha256=$EXPECTED_VECTORS_SHA256"', script)
         self.assertIn('schema:"lex-staging-cleanup-receipt/3"', script)
         self.assertIn("validate-lineage-receipt", script)
+        self.assertIn("validate-legacy-pointer", script)
+        self.assertIn(
+            "2da4d2039b549ced38afbd305f9625e1190bf2118f5f765eef30d36a0c45c0d5",
+            contract,
+        )
+        self.assertIn(
+            "bb5a115b01262fbe486bd7c9f66e0941910aaf35bd23ee17caf7447b89b8a308",
+            contract,
+        )
+        legacy_start = script.index(
+            'if [ "$pointer_schema" = lex-artifact-pointer/1 ]'
+        )
+        legacy_end = script.index("  else", legacy_start)
+        legacy = script[legacy_start:legacy_end]
+        self.assertIn("validate-legacy-pointer", legacy)
+        self.assertIn('artifact verify', legacy)
+        self.assertIn('while IFS= read -r asset', legacy)
+        self.assertNotIn("$cleanup_receipt", legacy)
+        self.assertNotIn("$cleanup_manifest", legacy)
+        self.assertNotIn("$cleanup_signature", legacy)
 
         self.assertIn('--target "$CORPUS_COMMIT"', script)
         self.assertIn("immutable-releases", script)
@@ -661,6 +718,123 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
                 capture_output=True,
                 check=False,
             )
+
+    def run_legacy_contract(self, pointer, manifest, publisher):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            directory = Path(temporary)
+            pointer_path = directory / "pointer.json"
+            manifest_path = directory / "manifest.json"
+            pointer_path.write_bytes((json.dumps(pointer, indent=2) + "\n").encode())
+            manifest_path.write_bytes(
+                json.dumps(manifest, separators=(",", ":")).encode()
+            )
+            return subprocess.run(
+                [
+                    sys.executable,
+                    CONTRACT.as_posix(),
+                    "validate-legacy-pointer",
+                    pointer_path.as_posix(),
+                    manifest_path.as_posix(),
+                    publisher,
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+    @staticmethod
+    def legacy_manifest(publisher):
+        common_files = [
+            {
+                "path": "model-manifest.json",
+                "kind": "json",
+                "size": 369,
+                "sha256": "4fef034b325dd2b7e5296ed5927c7ea21a144861a4b964cc1ab15129f6ccc696",
+            },
+            {
+                "path": "model.onnx",
+                "kind": "embedding-model",
+                "size": 118346824,
+                "sha256": "dd476dd0c2514e9b9be83aeb3853fac0763e0bdf4a71645407587d77c48a2d88",
+            },
+            {
+                "path": "sentencepiece.bpe.model",
+                "kind": "file",
+                "size": 5069051,
+                "sha256": "cfc8146abe2a0488e9e2a0c56de7952f7c11ab059eca145a0a727afce0db2865",
+            },
+        ]
+        if publisher == "eu-eurlex":
+            manifest_sha = "2da4d2039b549ced38afbd305f9625e1190bf2118f5f765eef30d36a0c45c0d5"
+            corpus = "7595e12ba31920fe6229f707f13eb5b8effa05c7"
+            created_at = "2026-08-14T04:32:59Z"
+            files = [
+                {
+                    "path": "eu-scope.json",
+                    "kind": "json",
+                    "size": 4814,
+                    "sha256": "7cfa06fd83a8e5bdffe9c9c3713c2aeaf357ffbabb65545b4577c5ca4d1760bf",
+                },
+                {
+                    "path": "eu-work-enrichment.json",
+                    "kind": "json",
+                    "size": 8352,
+                    "sha256": "b5fc3668cc2370748ad32daad7240aaf91ab4008facfd9c3da1bf49d65a14be3",
+                },
+                {
+                    "path": "index-eu-eurlex.db",
+                    "kind": "sqlite-index",
+                    "size": 603197440,
+                    "sha256": "366447f7c114d8e5586687b8f28ea78b9e7d058a80235ee9996f6a25f4859e94",
+                },
+                {
+                    "path": "index-eu-eurlex.vectors",
+                    "kind": "file",
+                    "size": 333574016,
+                    "sha256": "01fe518b462a64f7337c672a4863da9fab86e56586844affaa146016b495b9b9",
+                },
+                *common_files,
+            ]
+        elif publisher == "lu-legilux":
+            manifest_sha = "bb5a115b01262fbe486bd7c9f66e0941910aaf35bd23ee17caf7447b89b8a308"
+            corpus = "69a4bec429c5afd73261e6959ca42c9ca796d567"
+            created_at = "2026-08-13T14:51:44Z"
+            files = [
+                {
+                    "path": "index-lu-legilux.db",
+                    "kind": "sqlite-index",
+                    "size": 575389696,
+                    "sha256": "c18e1d395b539eb0529e61d0df68aac0902793cc0a1d74396b5b920a01bd0271",
+                },
+                {
+                    "path": "index-lu-legilux.vectors",
+                    "kind": "file",
+                    "size": 46717376,
+                    "sha256": "1bab8de8a3c03a30149feecf8cecee9e5d4a74ad0ebaa440208b2529718b1109",
+                },
+                *common_files,
+            ]
+        else:
+            raise ValueError(publisher)
+        code = "51e33b406475fa7ff7014d21d94ef2ae1c3c3ed4"
+        manifest = {
+            "schema": "lex-artifacts/1",
+            "algorithm": "ECDSA-P256-SHA256",
+            "key_id": "keyvault-lex-v2",
+            "created_at": created_at,
+            "code_commit": code,
+            "sources": {
+                "articles_commit": "f95da3e9ce88baebc99d4b3d307679feca8c1d50",
+                "build_origin": "hash-pinned-private-staging",
+                "collection": publisher,
+                "corpus_commit": corpus,
+                "publication_tool_commit": code,
+                "queue_commit": "7510ba2dccd3a99a02fb020faea2d074c43e1a54",
+            },
+            "files": files,
+        }
+        return manifest, manifest_sha, corpus
 
 
 if __name__ == "__main__":
