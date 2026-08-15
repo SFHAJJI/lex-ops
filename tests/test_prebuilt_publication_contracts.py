@@ -1,8 +1,7 @@
 import json
-import os
 from pathlib import Path
-import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -10,15 +9,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "publish-prebuilt-index.yml"
 PUBLISH = ROOT / "publish-prebuilt-index.sh"
-CONTRACT = ROOT / "scripts" / "prebuilt-publication-contract.sh"
-
-
-def bash_executable():
-    if os.name != "nt":
-        return shutil.which("bash") or "bash"
-    git = Path(shutil.which("git") or "")
-    candidate = git.parent.parent / "bin" / "bash.exe"
-    return str(candidate) if candidate.is_file() else "bash"
+CONTRACT = ROOT / "scripts" / "prebuilt_publication_contract.py"
 
 
 class PrebuiltPublicationContractTests(unittest.TestCase):
@@ -235,7 +226,6 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
         common = {
             "collection": self.publisher,
             "queue_ticket_id": self.ticket,
-            "queue_commit": self.queue,
             "corpus_commit": self.corpus,
             "build_code_commit": self.code,
             "articles_commit": self.articles,
@@ -273,7 +263,6 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
             self.publisher,
             f"staging/{self.publisher}/{self.ticket}",
             self.ticket,
-            self.queue,
             self.corpus,
             self.code,
             self.articles,
@@ -300,7 +289,7 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
                 else:
                     values.append(str(argument))
             return subprocess.run(
-                [bash_executable(), CONTRACT.as_posix(), command, *values],
+                [sys.executable, CONTRACT.as_posix(), command, *values],
                 cwd=ROOT,
                 text=True,
                 capture_output=True,
