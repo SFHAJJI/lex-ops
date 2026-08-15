@@ -164,12 +164,17 @@ verify_complete_bundle() {
     || { echo "ERROR: receipt semantic activation differs from the signed benchmark" >&2; return 1; }
 }
 
-validate_tag_target() {
+validate_tag_snapshot() {
   local output="$1"
-  gh_api "repos/$repo/git/ref/tags/$tag" > "$output" || return 1
   jq -e --arg ref "refs/tags/$tag" --arg corpus "$CORPUS_COMMIT" \
     '.ref == $ref and .object.type == "commit" and .object.sha == $corpus' "$output" >/dev/null \
     || { echo "ERROR: release tag does not target the ticketed corpus commit" >&2; return 1; }
+}
+
+validate_tag_target() {
+  local output="$1"
+  gh_api "repos/$repo/git/ref/tags/$tag" > "$output" || return 1
+  validate_tag_snapshot "$output"
 }
 
 fetch_release_snapshot() {
@@ -225,15 +230,22 @@ pin_public_release() {
 }
 
 ensure_exact_tag() {
-  local output="$work_root/draft-tag.json" endpoint="repos/$repo/git/ref/tags/$tag"
+  local output="$work_root/draft-tag.json" endpoint="repos/$repo/git/ref/tags/$tag" attempt
   if gh_api "$endpoint" > "$output" 2>/dev/null; then
-    validate_tag_target "$output"
-    return
+    validate_tag_snapshot "$output"
+    return $?
   fi
   gh_api --method POST "repos/$repo/git/refs" \
     -f "ref=refs/tags/$tag" -f "sha=$CORPUS_COMMIT" >/dev/null 2>&1 || true
-  gh_api "$endpoint" > "$output" || return 1
-  validate_tag_target "$output"
+  for attempt in $(seq 1 12); do
+    if gh_api "$endpoint" > "$output" 2>/dev/null; then
+      validate_tag_snapshot "$output"
+      return $?
+    fi
+    [ "$attempt" -eq 12 ] || sleep 5
+  done
+  echo "ERROR: release tag was not readable after bounded creation read-back" >&2
+  return 1
 }
 
 write_asset_inventory() {
