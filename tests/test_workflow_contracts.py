@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 
 
@@ -512,13 +513,8 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
         workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(encoding="utf-8")
         publication = workflow.index('gh release upload "$EVALUATION_RELEASE"')
         publish_boundary = workflow.index('gh release edit "$EVALUATION_RELEASE"', publication)
-        final_state = workflow.index(
-            'published=$(gh release view "$EVALUATION_RELEASE"', publish_boundary
-        )
-        readback = workflow.index(
-            'https://github.com/SFHAJJI/lex-ops/releases/download/$EVALUATION_RELEASE/$asset',
-            final_state,
-        )
+        final_state = workflow.index("for attempt in {1..12}", publish_boundary)
+        readback = workflow.index("validate_release_snapshot public evidence", final_state)
         final_live = workflow.index("bootstrap-routes.readback.json", publication)
         relinquish = workflow.index(
             'echo "candidate_owned=false" >> "$GITHUB_OUTPUT"', publication
@@ -529,9 +525,9 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
         self.assertLess(relinquish, publish_boundary)
         self.assertLess(publish_boundary, final_state)
         self.assertLess(final_state, readback)
-        self.assertIn(".isDraft == true and .isPrerelease == false", workflow)
-        self.assertIn(".isDraft == false and .isPrerelease == false", workflow)
-        self.assertIn("([.assets[].name] | sort) == $expected", workflow)
+        self.assertIn('.draft == ($state == "draft")', workflow)
+        self.assertIn('.immutable == ($state == "public")', workflow)
+        self.assertIn("[.assets[] | {name,digest,size,state}]", workflow)
         self.assertIn("--retry-all-errors", workflow)
         self.assertIn('sha256sum "$downloaded"', workflow)
         self.assertIn('wc -c < "$downloaded"', workflow)
@@ -547,13 +543,11 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
         retry = workflow[retry_start:retry_end]
 
         self.assertIn("assistant-eval verify-release", retry)
-        self.assertIn("public retry release identity or asset set differs", retry)
-        self.assertIn("public retry read-back changed", retry)
         self.assertIn("candidate_owned=$candidate_owned", retry)
-        self.assertNotIn("gh release upload", retry)
-        self.assertNotIn("gh release edit", retry)
+        self.assertNotIn("gh release", retry)
+        self.assertNotIn("gh api", retry)
+        self.assertNotIn("curl", retry)
         self.assertIn('echo "PUBLIC_RETRY=true" >> "$GITHUB_ENV"', workflow)
-        self.assertIn("and ([.assets[].name] | sort) == ($allowed | sort)", workflow)
 
     def test_evaluation_publication_describes_project_owner_review_honestly(self):
         workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(encoding="utf-8")
@@ -564,6 +558,332 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
         self.assertRegex(readme, r"verifies the project-owner review\s+signature")
         self.assertNotRegex(readme, r"verifies the independent human\s+review")
         self.assertIn("Promotion independently revalidates this package", workflow)
+
+    def test_evaluation_release_json_contract_fails_closed(self):
+        workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(encoding="utf-8")
+        start = workflow.index("# BEGIN EVALUATION_RELEASE_CONTRACT")
+        end = workflow.index("# END EVALUATION_RELEASE_CONTRACT", start)
+        contract = textwrap.dedent(workflow[workflow.index("\n", start) + 1 : end])
+        candidate = (
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+            / "Git"
+            / "bin"
+            / "bash.exe"
+        )
+        bash = str(candidate) if candidate.is_file() else shutil.which("bash")
+        self.assertIsNotNone(bash, "Git Bash is required for release contract tests")
+
+        tag = "assistant-eval-aaaaaaaaaaaa-bbbbbbbbbbbb"
+        commit = "c" * 40
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            directory = Path(temporary)
+            contract_path = directory / "release-contract.sh"
+            contract_path.write_text(contract, encoding="utf-8", newline="\n")
+            evidence = directory / "evidence"
+            evidence.mkdir()
+            name = "assistant-eval-report.json"
+            asset_path = evidence / name
+            asset_path.write_bytes(b"exact release bytes")
+            names_path = directory / "names.json"
+            names_path.write_text(json.dumps([name]), encoding="utf-8")
+            asset = {
+                "name": name,
+                "digest": "sha256:" + hashlib.sha256(asset_path.read_bytes()).hexdigest(),
+                "size": asset_path.stat().st_size,
+                "state": "uploaded",
+            }
+            release = {
+                "draft": False,
+                "prerelease": False,
+                "immutable": True,
+                "tag_name": tag,
+                "target_commitish": "main",
+                "assets": [asset],
+            }
+            tag_ref = {
+                "ref": f"refs/tags/{tag}",
+                "object": {"type": "commit", "sha": commit},
+            }
+            environment = {
+                **os.environ,
+                "EVALUATION_RELEASE": tag,
+                "EVALUATION_REPOSITORY": "SFHAJJI/lex-ops",
+                "WORKFLOW_COMMIT": commit,
+            }
+
+            def run_release(
+                release_value=release,
+                tag_value=tag_ref,
+                setting_value={"enabled": True},
+                state="public",
+            ):
+                release_path = directory / "release.json"
+                tag_path = directory / "tag.json"
+                setting_path = directory / "setting.json"
+                release_path.write_text(json.dumps(release_value), encoding="utf-8")
+                tag_path.write_text(json.dumps(tag_value), encoding="utf-8")
+                setting_path.write_text(json.dumps(setting_value), encoding="utf-8")
+                return subprocess.run(
+                    [
+                        bash,
+                        "-c",
+                        'set -euo pipefail; . "$1"; '
+                        'validate_release_snapshot "$2" "$3" "$4" "$5" "$7" false; '
+                        'validate_release_tag "$6"',
+                        "_",
+                        contract_path.as_posix(),
+                        state,
+                        evidence.as_posix(),
+                        names_path.as_posix(),
+                        release_path.as_posix(),
+                        tag_path.as_posix(),
+                        setting_path.as_posix(),
+                    ],
+                    cwd=ROOT,
+                    env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            valid_public = run_release()
+            self.assertEqual(0, valid_public.returncode, valid_public.stderr)
+            self.assertNotEqual(0, run_release(setting_value={"enabled": False}).returncode)
+
+            draft = json.loads(json.dumps(release))
+            draft.update(draft=True, immutable=False)
+            valid_draft = run_release(draft, state="draft")
+            self.assertEqual(0, valid_draft.returncode, valid_draft.stderr)
+
+            for field, value in (
+                ("draft", True),
+                ("prerelease", True),
+                ("immutable", False),
+                ("target_commitish", commit),
+                ("tag_name", "assistant-eval-wrong"),
+            ):
+                changed = json.loads(json.dumps(release))
+                changed[field] = value
+                with self.subTest(field=field):
+                    self.assertNotEqual(0, run_release(changed).returncode)
+            for label, added in (
+                ("extra", {"name": "injected", "digest": "sha256:" + "f" * 64, "size": 1, "state": "uploaded"}),
+                ("duplicate", dict(asset)),
+            ):
+                changed = json.loads(json.dumps(release))
+                changed["assets"].append(added)
+                with self.subTest(asset_set=label):
+                    self.assertNotEqual(0, run_release(changed).returncode)
+            for field, value in (
+                ("digest", "sha256:" + "f" * 64),
+                ("size", 999),
+                ("state", "new"),
+            ):
+                changed = json.loads(json.dumps(release))
+                changed["assets"][0][field] = value
+                with self.subTest(asset_field=field):
+                    self.assertNotEqual(0, run_release(changed).returncode)
+            for label, changed_ref in (
+                ("wrong ref", {**tag_ref, "ref": "refs/tags/assistant-eval-wrong"}),
+                ("indirect", {**tag_ref, "object": {"type": "tag", "sha": commit}}),
+                (
+                    "wrong target",
+                    {**tag_ref, "object": {"type": "commit", "sha": "d" * 40}},
+                ),
+            ):
+                with self.subTest(tag_ref=label):
+                    self.assertNotEqual(0, run_release(tag_value=changed_ref).returncode)
+
+            def run_tag_creation(state, initial_missing, tag_value=tag_ref, post_rc=0):
+                output_path = directory / "created-tag.json"
+                log_path = directory / "gh.log"
+                log_path.write_text("", encoding="utf-8")
+                result = subprocess.run(
+                    [
+                        bash,
+                        "-c",
+                        r'''set -euo pipefail
+. "$1"
+get_count=0
+gh() {
+  printf '%s\n' "$*" >> "$GH_LOG"
+  if [[ " $* " == *" --method POST "* ]]; then
+    return "$GH_POST_RC"
+  fi
+  get_count=$((get_count + 1))
+  if [ "$GH_INITIAL_MISSING" = true ] && [ "$get_count" = 1 ]; then
+    return 1
+  fi
+  printf '%s\n' "$GH_TAG_JSON"
+}
+ensure_release_tag "$2" "$3"
+''',
+                        "_",
+                        contract_path.as_posix(),
+                        state,
+                        output_path.as_posix(),
+                    ],
+                    cwd=ROOT,
+                    env={
+                        **environment,
+                        "GH_LOG": str(log_path),
+                        "GH_POST_RC": str(post_rc),
+                        "GH_INITIAL_MISSING": str(initial_missing).lower(),
+                        "GH_TAG_JSON": json.dumps(
+                            tag_value
+                        ),
+                    },
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                return result, log_path.read_text(encoding="utf-8")
+
+            public_missing, public_log = run_tag_creation("public", True)
+            self.assertNotEqual(0, public_missing.returncode)
+            self.assertNotIn("--method POST", public_log)
+
+            draft_created, draft_log = run_tag_creation("draft", True)
+            self.assertEqual(0, draft_created.returncode, draft_created.stderr)
+            self.assertIn("--method POST", draft_log)
+            self.assertIn(f"ref=refs/tags/{tag}", draft_log)
+            self.assertIn(f"sha={commit}", draft_log)
+
+            raced_create, raced_log = run_tag_creation("draft", True, post_rc=1)
+            self.assertEqual(0, raced_create.returncode, raced_create.stderr)
+            self.assertIn("--method POST", raced_log)
+
+            wrong_existing, wrong_log = run_tag_creation(
+                "draft",
+                False,
+                {**tag_ref, "object": {"type": "commit", "sha": "d" * 40}},
+            )
+            self.assertNotEqual(0, wrong_existing.returncode)
+            self.assertNotIn("--method POST", wrong_log)
+
+            def run_snapshot_fetch(release_id):
+                output_path = directory / "fetched-release.json"
+                log_path = directory / "fetch.log"
+                log_path.write_text("", encoding="utf-8")
+                result = subprocess.run(
+                    [
+                        bash,
+                        "-c",
+                        r'''set -euo pipefail
+. "$1"
+gh() {
+  printf '%s\n' "$*" >> "$GH_LOG"
+  printf '%s\n' "$GH_RELEASE_JSON"
+}
+fetch_release_snapshot "$2"
+''',
+                        "_",
+                        contract_path.as_posix(),
+                        output_path.as_posix(),
+                    ],
+                    cwd=ROOT,
+                    env={
+                        **environment,
+                        "EVALUATION_RELEASE_ID": release_id,
+                        "GH_LOG": str(log_path),
+                        "GH_RELEASE_JSON": json.dumps(release),
+                    },
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                return result, log_path.read_text(encoding="utf-8")
+
+            fetched, fetch_log = run_snapshot_fetch("17")
+            self.assertEqual(0, fetched.returncode, fetched.stderr)
+            self.assertIn("repos/SFHAJJI/lex-ops/releases/17", fetch_log)
+            self.assertNotIn("/releases/tags/", fetch_log)
+            for invalid_id in ("", "0", "01", "-1", "1.0", "abc"):
+                invalid_fetch, invalid_log = run_snapshot_fetch(invalid_id)
+                with self.subTest(release_id=invalid_id):
+                    self.assertNotEqual(0, invalid_fetch.returncode)
+                    self.assertEqual("", invalid_log)
+
+    def test_evaluation_release_is_attested_before_azure_and_frozen_exactly(self):
+        workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(encoding="utf-8")
+
+        self.assertIn("attestations: read", workflow)
+        self.assertIn("WORKFLOW_COMMIT: ${{ github.sha }}", workflow)
+        self.assertIn("X-GitHub-Api-Version: 2026-03-10", workflow)
+        self.assertIn('repos/$EVALUATION_REPOSITORY/immutable-releases', workflow)
+        self.assertIn('gh release verify "$EVALUATION_RELEASE" --repo "$EVALUATION_REPOSITORY"', workflow)
+        self.assertIn('gh release verify-asset "$EVALUATION_RELEASE"', workflow)
+        self.assertIn('repos/$EVALUATION_REPOSITORY/git/ref/tags/$EVALUATION_RELEASE', workflow)
+        self.assertIn('[[ "$WORKFLOW_COMMIT" =~ ^[0-9a-f]{40}$ ]]', workflow)
+        self.assertIn(
+            'gh release view "$EVALUATION_RELEASE" --repo "$EVALUATION_REPOSITORY"',
+            workflow,
+        )
+        self.assertIn("--json databaseId,tagName", workflow)
+        self.assertNotIn(
+            'repos/$EVALUATION_REPOSITORY/releases/tags/$EVALUATION_RELEASE',
+            workflow,
+        )
+
+        identity = workflow.index("scripts/assistant_evaluation_identity.py")
+        tag_creation = workflow.index('ensure_release_tag "$release_state"', identity)
+        self.assertLess(identity, tag_creation)
+
+        download = workflow.index("Download the exact draft or immutable public evidence")
+        public_retry_verify = workflow.index(
+            'validate_release_snapshot "$release_state" evidence',
+            download,
+        )
+        azure = workflow.index("Azure login for authenticated evidence", public_retry_verify)
+        self.assertLess(public_retry_verify, azure)
+
+        upload = workflow.index('gh release upload "$EVALUATION_RELEASE"')
+        immutable_recheck = workflow.index("immutable-release-setting-prepublish.json", upload)
+        exact_draft_recheck = workflow.index("validate_release_snapshot", immutable_recheck)
+        publish = workflow.index('gh release edit "$EVALUATION_RELEASE"', exact_draft_recheck)
+        self.assertLess(upload, immutable_recheck)
+        self.assertLess(immutable_recheck, exact_draft_recheck)
+        self.assertLess(exact_draft_recheck, publish)
+
+        poll = workflow.index("for attempt in {1..12}", publish)
+        final_verify = workflow.index("validate_release_snapshot public evidence", poll)
+        self.assertLess(publish, poll)
+        self.assertLess(poll, final_verify)
+
+        asset_start = workflow.index("          release_assets=(")
+        asset_end = workflow.index("          )", asset_start)
+        base_assets = re.findall(
+            r"^\s+evidence/([A-Za-z0-9._-]+)$",
+            workflow[asset_start:asset_end],
+            re.MULTILINE,
+        )
+        bootstrap_start = workflow.index("            release_assets+=(", asset_end)
+        bootstrap_end = workflow.index("            )", bootstrap_start)
+        bootstrap_assets = re.findall(
+            r"^\s+evidence/([A-Za-z0-9._-]+)$",
+            workflow[bootstrap_start:bootstrap_end],
+            re.MULTILINE,
+        )
+        self.assertEqual(
+            [
+                "assistant-eval-report.json",
+                "assistant-cases-v3.json",
+                "assistant-cases-v3.review.json",
+                "assistant-cases-v3.review.sig",
+                "assistant-browser-evidence.json",
+                "assistant-eval.manifest.json",
+                "assistant-eval.manifest.sig",
+            ],
+            base_assets,
+        )
+        self.assertEqual(
+            [
+                "bootstrap-equivalence.json",
+                "bootstrap-equivalence.manifest.json",
+                "bootstrap-equivalence.manifest.sig",
+            ],
+            bootstrap_assets,
+        )
 
     @staticmethod
     def report():

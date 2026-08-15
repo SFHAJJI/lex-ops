@@ -28,6 +28,7 @@ on:
         type: string
 
 permissions:
+  attestations: read
   contents: write
   id-token: write
 
@@ -46,6 +47,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       EVALUATION_RELEASE: ${{ inputs.evaluation_release }}
+      EVALUATION_REPOSITORY: SFHAJJI/lex-ops
+      WORKFLOW_COMMIT: ${{ github.sha }}
       CANDIDATE_REVISION: ${{ inputs.candidate_revision }}
       BOOTSTRAP_ROLLBACK_REVISION: ${{ inputs.bootstrap_rollback_revision }}
       BOOTSTRAP_CANONICAL_TEMPLATE_DIGEST: ${{ inputs.bootstrap_canonical_template_digest }}
@@ -66,8 +69,110 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          EVALUATION_RELEASE_CONTRACT="$RUNNER_TEMP/assistant-evaluation-release-contract.sh"
+          echo "EVALUATION_RELEASE_CONTRACT=$EVALUATION_RELEASE_CONTRACT" >> "$GITHUB_ENV"
+          cat > "$EVALUATION_RELEASE_CONTRACT" <<'EVALUATION_RELEASE_CONTRACT_SCRIPT'
+          # BEGIN EVALUATION_RELEASE_CONTRACT
+          fetch_release_snapshot() {
+            local output="$1"
+            [[ "${EVALUATION_RELEASE_ID:-}" =~ ^[1-9][0-9]*$ ]] || return 1
+            gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$EVALUATION_REPOSITORY/releases/$EVALUATION_RELEASE_ID" \
+              > "$output"
+          }
+          validate_release_tag() {
+            local tag_ref="$1"
+            jq -e --arg ref "refs/tags/$EVALUATION_RELEASE" \
+              --arg commit "$WORKFLOW_COMMIT" '
+                .ref == $ref
+                and .object.type == "commit"
+                and .object.sha == $commit
+              ' "$tag_ref" >/dev/null
+          }
+          ensure_release_tag() {
+            local state="$1" tag_ref="$2"
+            local endpoint="repos/$EVALUATION_REPOSITORY/git/ref/tags/$EVALUATION_RELEASE"
+            if gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+                "$endpoint" > "$tag_ref" 2>/dev/null; then
+              validate_release_tag "$tag_ref"
+              return
+            fi
+            [ "$state" = draft ] || return 1
+            gh api --method POST -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$EVALUATION_REPOSITORY/git/refs" \
+              -f "ref=refs/tags/$EVALUATION_RELEASE" \
+              -f "sha=$WORKFLOW_COMMIT" >/dev/null 2>&1 || true
+            gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "$endpoint" > "$tag_ref" || return 1
+            validate_release_tag "$tag_ref"
+          }
+          validate_release_snapshot() {
+            local state="$1" root="$2" expected_names="$3" release="$4"
+            local setting="$5" attest="$6"
+            local asset path sha size names inventory inventory_json readback downloaded
+            { [ "$state" = draft ] || [ "$state" = public ]; } \
+              && { [ "$attest" = false ] || [ "$attest" = true ]; } \
+              || return 1
+            jq -e '.enabled == true' "$setting" >/dev/null || return 1
+            jq -e '
+              type == "array" and length > 0 and length == (unique | length)
+              and all(.[]; type == "string" and test("^[A-Za-z0-9._-]+$"))
+            ' "$expected_names" >/dev/null || return 1
+            names="${release}.names"
+            inventory="${release}.assets.jsonl"
+            inventory_json="${release}.assets.json"
+            jq -er '.[]' "$expected_names" | tr -d '\r' > "$names" || return 1
+            : > "$inventory"
+            while IFS= read -r asset; do
+              path="$root/$asset"
+              [ -f "$path" ] || return 1
+              sha=$(sha256sum "$path" | cut -d' ' -f1) || return 1
+              size=$(wc -c < "$path" | tr -d ' ') || return 1
+              jq -cn --arg name "$asset" --arg sha "$sha" --argjson size "$size" \
+                '{name:$name,sha256:$sha,size:$size}' >> "$inventory" || return 1
+            done < "$names"
+            jq -s 'sort_by(.name)' "$inventory" > "$inventory_json" || return 1
+            jq -e --arg state "$state" --arg tag "$EVALUATION_RELEASE" \
+              --arg target main --slurpfile expected "$inventory_json" '
+                .draft == ($state == "draft")
+                and .prerelease == false
+                and .immutable == ($state == "public")
+                and .tag_name == $tag and .target_commitish == $target
+                and ((.assets | type) == "array")
+                and ([.assets[] | {name,digest,size,state}] | sort_by(.name))
+                  == ($expected[0]
+                    | map({name,digest:("sha256:" + .sha256),size,state:"uploaded"})
+                    | sort_by(.name))
+              ' "$release" >/dev/null || return 1
+            [ "$state" = public ] && [ "$attest" = true ] || return 0
+            gh release verify "$EVALUATION_RELEASE" --repo "$EVALUATION_REPOSITORY" \
+              >/dev/null || return 1
+            readback=$(mktemp -d) || return 1
+            while IFS= read -r asset; do
+              path="$root/$asset"
+              gh release verify-asset "$EVALUATION_RELEASE" "$path" \
+                --repo "$EVALUATION_REPOSITORY" >/dev/null || return 1
+              downloaded="$readback/$asset"
+              curl --fail --show-error --silent --location --retry 5 --retry-all-errors \
+                --retry-delay 2 \
+                "https://github.com/$EVALUATION_REPOSITORY/releases/download/$EVALUATION_RELEASE/$asset" \
+                -o "$downloaded" || return 1
+              [ -f "$downloaded" ] \
+                && [ "$(sha256sum "$downloaded" | cut -d' ' -f1)" \
+                  = "$(sha256sum "$path" | cut -d' ' -f1)" ] \
+                && [ "$(wc -c < "$downloaded" | tr -d ' ')" \
+                  = "$(wc -c < "$path" | tr -d ' ')" ] \
+                && cmp --silent "$downloaded" "$path" \
+                || return 1
+            done < "$names"
+          }
+          # END EVALUATION_RELEASE_CONTRACT
+          EVALUATION_RELEASE_CONTRACT_SCRIPT
+          . "$EVALUATION_RELEASE_CONTRACT"
           [[ "$EVALUATION_RELEASE" =~ ^assistant-eval-[0-9a-f]{12}-[0-9a-f]{12}$ ]] \
             || { echo "::error::invalid evaluation release tag"; exit 2; }
+          [[ "$WORKFLOW_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::invalid protected workflow commit"; exit 2; }
           [[ "$CANDIDATE_REVISION" =~ ^ca-lex-web--[a-z0-9-]+$ ]] \
             || { echo "::error::invalid candidate revision"; exit 2; }
           supplied=0
@@ -101,52 +206,90 @@ jobs:
               "bootstrap-equivalence.json",
               "bootstrap-equivalence.manifest.json",
               "bootstrap-equivalence.manifest.sig"
-            ] else [] end)')
-          release_state=$(gh release view "$EVALUATION_RELEASE" \
-            --json isDraft,isPrerelease,tagName,assets)
+            ] else [] end) | sort')
           required=$(jq -cn '[
             "assistant-eval-report.json",
             "assistant-cases-v3.json",
             "assistant-cases-v3.review.json",
             "assistant-cases-v3.review.sig"
           ]')
-          if printf '%s' "$release_state" | jq -e \
-              --arg tag "$EVALUATION_RELEASE" --argjson allowed "$allowed" \
-              --argjson required "$required" '
-              .tagName == $tag and .isDraft == true and .isPrerelease == false
-              and (([.assets[].name] | length) >= 4)
-              and (([.assets[].name] | unique | length) == ([.assets[].name] | length))
-              and (($required - [.assets[].name]) | length == 0)
-              and (([.assets[].name] - $allowed) | length == 0)' >/dev/null; then
-            echo "PUBLIC_RETRY=false" >> "$GITHUB_ENV"
-            mkdir evidence
-            gh release download "$EVALUATION_RELEASE" --dir evidence \
-              --pattern 'assistant-eval-report.json' \
-              --pattern 'assistant-cases-v3.json' \
-              --pattern 'assistant-cases-v3.review.json' \
-              --pattern 'assistant-cases-v3.review.sig'
-            test "$(find evidence -maxdepth 1 -type f | wc -l)" -eq 4
-          elif printf '%s' "$release_state" | jq -e \
-              --arg tag "$EVALUATION_RELEASE" --argjson allowed "$allowed" '
-              .tagName == $tag and .isDraft == false and .isPrerelease == false
-              and ([.assets[].name] | sort) == ($allowed | sort)' >/dev/null; then
-            echo "PUBLIC_RETRY=true" >> "$GITHUB_ENV"
-            mkdir evidence
-            while IFS= read -r asset; do
+          gh release verify --help >/dev/null
+          gh release verify-asset --help >/dev/null
+          EVALUATION_RELEASE_ID=$(
+            gh release view "$EVALUATION_RELEASE" --repo "$EVALUATION_REPOSITORY" \
+              --json databaseId,tagName \
+            | jq -er --arg tag "$EVALUATION_RELEASE" '
+              if .tagName == $tag
+                and ((.databaseId | type) == "number")
+                and .databaseId > 0
+                and .databaseId == (.databaseId | floor)
+              then (.databaseId | tostring)
+              else error("release locator is not exact") end
+            '
+          ) \
+            || { echo "::error::evaluation release locator is not exact"; exit 2; }
+          echo "EVALUATION_RELEASE_ID=$EVALUATION_RELEASE_ID" >> "$GITHUB_ENV"
+          entry_release="$RUNNER_TEMP/evaluation-release-entry.json"
+          fetch_release_snapshot "$entry_release"
+          release_state=$(jq -er --arg tag "$EVALUATION_RELEASE" \
+            --arg target main --argjson allowed "$allowed" \
+            --argjson required "$required" '
+              (.tag_name == $tag and .target_commitish == $target
+                and .prerelease == false and ((.assets | type) == "array")
+                and ([.assets[].name] | length) == ([.assets[].name] | unique | length)
+                and (($required - [.assets[].name]) | length == 0)
+                and (([.assets[].name] - $allowed) | length == 0)
+                and (all(.assets[];
+                  (.digest | type) == "string"
+                  and (.digest | test("^sha256:[0-9a-f]{64}$"))
+                  and (.size | type) == "number" and (.size % 1 == 0) and .size >= 0
+                  and .state == "uploaded"))
+              ) as $common
+              | if ($common and .draft == true and .immutable == false) then "draft"
+                elif ($common and .draft == false and .immutable == true
+                  and ([.assets[].name] | sort) == $allowed) then "public"
+                else error("evaluation release is not exact") end
+            ' "$entry_release") \
+            || { echo "::error::evaluation release is not an exact retry-safe release"; exit 2; }
+          [ "$release_state" = public ] \
+            && echo "PUBLIC_RETRY=true" >> "$GITHUB_ENV" \
+            || echo "PUBLIC_RETRY=false" >> "$GITHUB_ENV"
+          entry_names="$RUNNER_TEMP/evaluation-release-entry-names.json"
+          entry_name_list="$RUNNER_TEMP/evaluation-release-entry-names.txt"
+          jq '[.assets[].name] | sort' "$entry_release" > "$entry_names"
+          jq -er '.[]' "$entry_names" | tr -d '\r' > "$entry_name_list"
+          mkdir evidence
+          while IFS= read -r asset; do
+            if [ "$release_state" = draft ]; then
+              gh release download "$EVALUATION_RELEASE" --repo "$EVALUATION_REPOSITORY" \
+                --dir evidence --pattern "$asset"
+            else
               curl --fail --show-error --silent --location --retry 5 --retry-all-errors \
                 --retry-delay 2 \
-                "https://github.com/SFHAJJI/lex-ops/releases/download/$EVALUATION_RELEASE/$asset" \
+                "https://github.com/$EVALUATION_REPOSITORY/releases/download/$EVALUATION_RELEASE/$asset" \
                 -o "evidence/$asset"
-            done < <(printf '%s' "$allowed" | jq -r '.[]')
-            [ "$(find evidence -maxdepth 1 -type f | wc -l)" = "$(printf '%s' "$allowed" | jq length)" ] \
-              || { echo "::error::public release anonymous asset read-back is incomplete"; exit 1; }
-          else
-            echo "::error::evaluation release is not an exact retry-safe release"
-            exit 2
+            fi
+          done < "$entry_name_list"
+          [ "$(find evidence -maxdepth 1 -type f | wc -l)" = "$(jq length "$entry_names")" ] \
+            || { echo "::error::evaluation release asset download is incomplete"; exit 1; }
+          entry_setting="$RUNNER_TEMP/immutable-release-setting-entry.json"
+          entry_recheck="$RUNNER_TEMP/evaluation-release-entry-recheck.json"
+          entry_tag="$RUNNER_TEMP/evaluation-release-entry-tag.json"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$EVALUATION_REPOSITORY/immutable-releases" > "$entry_setting"
+          fetch_release_snapshot "$entry_recheck"
+          entry_attest=false
+          if [ "$release_state" = public ]; then
+            entry_attest=true
           fi
+          validate_release_snapshot "$release_state" evidence "$entry_names" \
+            "$entry_recheck" "$entry_setting" "$entry_attest" \
+            || { echo "::error::release metadata, attestation, or read-back differs"; exit 1; }
           python3 scripts/assistant_evaluation_identity.py \
             evidence/assistant-eval-report.json \
             "$CANDIDATE_REVISION" "$EVALUATION_RELEASE" "$GITHUB_ENV"
+          ensure_release_tag "$release_state" "$entry_tag" \
+            || { echo "::error::release tag is not a direct exact workflow commit"; exit 1; }
 
       - name: Check out the exact evaluated Lex commit
         shell: bash
@@ -201,6 +344,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          . "$EVALUATION_RELEASE_CONTRACT"
           . lex/scripts/deploy/az-retry.sh
           . lex/scripts/deploy/az-reauth.sh
           az_reauth
@@ -262,15 +406,6 @@ jobs:
               --base-url "https://$candidate_fqdn" \
               --candidate-container-app-resource-id "$app_id" \
               --candidate-revision "$CANDIDATE_REVISION"
-            retry_assets=(
-              assistant-eval-report.json
-              assistant-cases-v3.json
-              assistant-cases-v3.review.json
-              assistant-cases-v3.review.sig
-              assistant-browser-evidence.json
-              assistant-eval.manifest.json
-              assistant-eval.manifest.sig
-            )
             if [ "$BOOTSTRAP_MODE" = "true" ]; then
               legacy_authority=$(jq -er .legacy_authority.revision_name \
                 evidence/bootstrap-equivalence.json)
@@ -289,33 +424,7 @@ jobs:
                 --canonical-template-digest "$BOOTSTRAP_CANONICAL_TEMPLATE_DIGEST" \
                 --image-digest "$BOOTSTRAP_EXPECTED_IMAGE_DIGEST" \
                 --cases-sha256 "$CASES_SHA"
-              retry_assets+=(
-                bootstrap-equivalence.json
-                bootstrap-equivalence.manifest.json
-                bootstrap-equivalence.manifest.sig
-              )
             fi
-            expected_assets=$(printf '%s\n' "${retry_assets[@]}" | jq -Rsc \
-              'split("\n") | map(select(length > 0)) | sort')
-            published=$(gh release view "$EVALUATION_RELEASE" \
-              --json isDraft,isPrerelease,tagName,assets)
-            printf '%s' "$published" | jq -e \
-              --arg tag "$EVALUATION_RELEASE" --argjson expected "$expected_assets" '
-                .tagName == $tag and .isDraft == false and .isPrerelease == false
-                and ([.assets[].name] | sort) == $expected' >/dev/null \
-              || { echo "::error::public retry release identity or asset set differs"; exit 1; }
-            retry_readback=$(mktemp -d)
-            for asset in "${retry_assets[@]}"; do
-              curl --fail --show-error --silent --location --retry 5 --retry-all-errors \
-                --retry-delay 2 \
-                "https://github.com/SFHAJJI/lex-ops/releases/download/$EVALUATION_RELEASE/$asset" \
-                -o "$retry_readback/$asset"
-              [ "$(sha256sum "$retry_readback/$asset" | cut -d' ' -f1)" \
-                  = "$(sha256sum "evidence/$asset" | cut -d' ' -f1)" ] \
-                && [ "$(wc -c < "$retry_readback/$asset" | tr -d ' ')" \
-                  = "$(wc -c < "evidence/$asset" | tr -d ' ')" ] \
-                || { echo "::error::public retry read-back changed for $asset"; exit 1; }
-            done
             echo "candidate_owned=$candidate_owned" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -323,7 +432,7 @@ jobs:
             [ "$candidate_active" = "true" ] \
               || { echo "::error::bootstrap C must already be active at zero traffic"; exit 1; }
             # A failed bootstrap publication abandons this pair by deactivating C under max=1.
-            # A successful publication clears ownership only after immutable public read-back.
+            # Keep ownership through every reversible pre-publish check.
             candidate_owned=true
             echo "candidate_owned=true" >> "$GITHUB_OUTPUT"
           else
@@ -604,7 +713,8 @@ jobs:
               evidence/bootstrap-equivalence.manifest.sig
             )
           fi
-          gh release upload "$EVALUATION_RELEASE" "${release_assets[@]}" --clobber
+          gh release upload "$EVALUATION_RELEASE" "${release_assets[@]}" \
+            --repo "$EVALUATION_REPOSITORY" --clobber
           if [ "$BOOTSTRAP_MODE" = "true" ]; then
             # Uploads are still confined to the draft. Re-read every live revision immediately
             # before the irreversible public-release boundary, then verify the signed package
@@ -635,6 +745,23 @@ jobs:
           release_notes="Signed production release evidence for candidate revision $CANDIDATE_REVISION. Promotion independently revalidates this package against Azure and the live candidate attestation."
           if [ "$BOOTSTRAP_MODE" = "true" ]; then
             release_notes="$release_notes Bootstrap fallback $BOOTSTRAP_ROLLBACK_REVISION is a signed canonical-template/image equivalent first-release fallback; it is not independently evaluated."
+          fi
+          release_names="$RUNNER_TEMP/evaluation-release-names.json"
+          printf '%s\n' "${release_assets[@]##*/}" \
+            | jq -Rsc 'split("\n") | map(select(length > 0)) | sort' > "$release_names"
+          prepublish_setting="$RUNNER_TEMP/immutable-release-setting-prepublish.json"
+          prepublish_release="$RUNNER_TEMP/evaluation-release-prepublish.json"
+          prepublish_tag="$RUNNER_TEMP/evaluation-release-prepublish-tag.json"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$EVALUATION_REPOSITORY/immutable-releases" > "$prepublish_setting"
+          fetch_release_snapshot "$prepublish_release"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$EVALUATION_REPOSITORY/git/ref/tags/$EVALUATION_RELEASE" > "$prepublish_tag"
+          validate_release_snapshot draft evidence "$release_names" \
+            "$prepublish_release" "$prepublish_setting" false \
+            && validate_release_tag "$prepublish_tag" \
+            || { echo "::error::draft release changed immediately before publication"; exit 1; }
+          if [ "$BOOTSTRAP_MODE" = "true" ]; then
             # The publish API may succeed even if the runner is cancelled before its response is
             # observed. Relinquish cleanup ownership before that ambiguous boundary so public
             # signed evidence can never be followed by automatic C deactivation and R purging.
@@ -642,32 +769,31 @@ jobs:
             echo "candidate_owned=false" >> "$GITHUB_OUTPUT"
           fi
           gh release edit "$EVALUATION_RELEASE" --draft=false --latest=false \
+            --repo "$EVALUATION_REPOSITORY" \
             --title "Lex assistant evaluation ${CODE_COMMIT:0:12}" \
             --notes "$release_notes"
-          published=$(gh release view "$EVALUATION_RELEASE" \
-            --json isDraft,isPrerelease,tagName,assets)
-          expected_assets=$(printf '%s\n' "${release_assets[@]##*/}" | jq -Rsc \
-            'split("\n") | map(select(length > 0)) | sort')
-          printf '%s' "$published" | jq -e \
-            --arg tag "$EVALUATION_RELEASE" --argjson expected "$expected_assets" '
-              .tagName == $tag and .isDraft == false and .isPrerelease == false
-              and ([.assets[].name] | sort) == $expected' >/dev/null \
-            || { echo "::error::published release identity or asset set differs"; exit 1; }
-          readback_dir=$(mktemp -d)
-          for asset_path in "${release_assets[@]}"; do
-            asset=${asset_path##*/}
-            downloaded="$readback_dir/$asset"
-            curl --fail --show-error --silent --location --retry 5 --retry-all-errors \
-              --retry-delay 2 \
-              "https://github.com/SFHAJJI/lex-ops/releases/download/$EVALUATION_RELEASE/$asset" \
-              -o "$downloaded"
-            [ -f "$downloaded" ] \
-              && [ "$(sha256sum "$downloaded" | cut -d' ' -f1)" \
-                = "$(sha256sum "$asset_path" | cut -d' ' -f1)" ] \
-              && [ "$(wc -c < "$downloaded" | tr -d ' ')" \
-                = "$(wc -c < "$asset_path" | tr -d ' ')" ] \
-              || { echo "::error::published release read-back differs for $asset"; exit 1; }
+          release_verified=false
+          for attempt in {1..12}; do
+            published_setting="$RUNNER_TEMP/immutable-release-setting-published.json"
+            published_release="$RUNNER_TEMP/evaluation-release-published.json"
+            published_tag="$RUNNER_TEMP/evaluation-release-published-tag.json"
+            if gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+                "repos/$EVALUATION_REPOSITORY/immutable-releases" > "$published_setting" \
+              && fetch_release_snapshot "$published_release" \
+              && gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+                "repos/$EVALUATION_REPOSITORY/git/ref/tags/$EVALUATION_RELEASE" \
+                > "$published_tag" \
+              && validate_release_snapshot public evidence "$release_names" \
+                "$published_release" "$published_setting" true \
+              && validate_release_tag "$published_tag"; then
+              release_verified=true
+              break
+            fi
+            echo "immutable release or asset attestation is not yet exact; retrying" >&2
+            [ "$attempt" = 12 ] || sleep 5
           done
+          [ "$release_verified" = true ] \
+            || { echo "::error::published release never became immutable and exact"; exit 1; }
 
       - name: Always restore one active quota authority
         if: always() && steps.publish.outputs.candidate_owned == 'true'
