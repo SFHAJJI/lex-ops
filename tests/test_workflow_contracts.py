@@ -1,7 +1,9 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,6 +16,233 @@ IDENTITY_SCRIPT = ROOT / "scripts" / "assistant_evaluation_identity.py"
 
 
 class WorkflowContractTests(unittest.TestCase):
+    def test_one_time_stale_claim_cleanup_is_exact_read_only_except_for_two_claims(self):
+        path = WORKFLOWS / "recover-stale-publication-claims.yml"
+        self.assertTrue(path.exists(), "the exact one-time stale-claim recovery is missing")
+        workflow = path.read_text(encoding="utf-8")
+
+        for expected in (
+            "workflow_commit:",
+            "github.sha == inputs.workflow_commit",
+            "environment: production",
+            "group: lex-production",
+            "cancel-in-progress: false",
+            "actions: read",
+            "contents: read",
+            "id-token: write",
+            "GH_TOKEN: ${{ github.token }}",
+            "297d84df5dc6c2405c1cd5665fb8d1354f76f013",
+            ".github/workflows/publish-prebuilt-index.yml",
+            'status == "completed"',
+            'conclusion == "failure"',
+            "31896356598",
+            "31896356790",
+            "publication-runs/eu-eurlex/cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c.json",
+            "0x8DEFAEC98CA64E6",
+            "7060a32760b8c3b9699b6877b8d1fe6d3cf8cb969bed04338272c97ec50cf80d",
+            "publication-runs/lu-legilux/f2d4c2ed2b673f9db4abda429ba1451c3be80a4344ab589c86b1a7f29d39819c.json",
+            "0x8DEFAEC95B00B6C",
+            "17098b242d224eeb6f0fd5e2b396e358d21fc4c34396d791df8a62bfdf95d344",
+            "current/eu-eurlex.json",
+            "0x8DEF9C349323805",
+            "a460020a374eaeb7adbcd87fdbeaeb231055e9efd4767422c5940a3f9cf842dc",
+            "current/lu-legilux.json",
+            "0x8DEF94A869B8C85",
+            "6b25b34ab4e773c9f7b417183dc04dcc813c60ed96571fe636818d914aa215c0",
+            "0x8DEFAEA3A7D4D33",
+            "f827e089bddff64709926af4341bc0ddbfbef829a5c3e29400754aec3b649fd9",
+            "589156352",
+            "0x8DEFAEC4628DF51",
+            "fb600d1221ab108f5f55f287682844b9f2fa03308c5401ed7d9488ae2544b6ad",
+            "140342576",
+            "0x8DEFAB4AEE3239C",
+            "fd404e736c29c4d19174ceb2c14667a80270409d222053fee79f0e25e910c0fa",
+            "717422592",
+            "0x8DEFAB4AB09F1A2",
+            "4a4d5fae77d72e74e4c295eb119f15add988cda6fce85b470ca1eb3873b2294b",
+            "46831856",
+            "6a2fb2647dea3ba0b3391e40a0612073c626ef0966bd816cdb8b99b57135c8da",
+            "index-eu-eurlex-cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c",
+            "index-lu-legilux-f2d4c2ed2b673f9db4abda429ba1451c3be80a4344ab589c86b1a7f29d39819c",
+            "require_github_404",
+            "verify_failed_run",
+            "verify_claim",
+            "inspect_claim",
+            "verify_pointer",
+            "verify_staging_snapshot",
+            "prove_claim_absent",
+            "HTTP 404",
+            "--if-match",
+            "$GITHUB_STEP_SUMMARY",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, workflow)
+
+        self.assertNotIn("actions/checkout@", workflow)
+        self.assertEqual(1, workflow.count("uses:"), "only pinned Azure OIDC login is allowed")
+        self.assertRegex(
+            workflow,
+            r"uses: azure/login@[0-9a-f]{40}",
+            "Azure login must be pinned to an immutable action commit",
+        )
+        publisher_workflow = (WORKFLOWS / "publish-prebuilt-index.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("group: publish-prebuilt-${{ inputs.publisher }}", publisher_workflow)
+        self.assertIn("group: publish-prebuilt-${{ matrix.publisher }}", workflow)
+        self.assertIn("publisher: [eu-eurlex, lu-legilux]", workflow)
+        self.assertEqual(1, workflow.count("group: lex-production"))
+        self.assertEqual(1, workflow.count("az storage blob delete"))
+        self.assertIn('--name "$CLAIM_NAME" --if-match "$CLAIM_ETAG"', workflow)
+        self.assertEqual(1, workflow.count("present) delete_claim ;;"))
+        self.assertIn("false) printf -v \"$result_name\" '%s' absent", workflow)
+        self.assertIn("conditional deletion response was ambiguous", workflow)
+        self.assertEqual(
+            2,
+            len(re.findall(r"^\s+verify_pointer (?:before|after)$", workflow, re.MULTILINE)),
+            "each publisher pointer must be byte-verified before and after cleanup",
+        )
+        self.assertEqual(
+            2,
+            len(re.findall(r"^\s+verify_staging_snapshot$", workflow, re.MULTILINE)),
+            "each publisher staging snapshot must be verified before and after cleanup",
+        )
+        self.assertEqual(
+            2,
+            len(
+                re.findall(
+                    r"^\s+verify_absent_target (?:before|after)$",
+                    workflow,
+                    re.MULTILINE,
+                )
+            ),
+            "each publisher release and tag must be absent before and after cleanup",
+        )
+        self.assertEqual(
+            workflow.count("az storage blob "),
+            workflow.count("--auth-mode login"),
+            "every Blob operation must use the production OIDC identity",
+        )
+        for forbidden in (
+            "--auth-mode key",
+            "--account-key",
+            "--sas-token",
+            "az storage blob upload",
+            "az storage blob update",
+            "az storage blob metadata update",
+            "az storage blob copy",
+            "az storage blob delete-batch",
+            "gh release",
+            "git push",
+            "workflow_call:",
+            "schedule:",
+            "LEX_OPS_TOKEN",
+            "--request",
+            " -X ",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, workflow)
+
+    def test_one_time_stale_claim_cleanup_resumes_absent_and_ambiguous_delete_states(self):
+        workflow = (WORKFLOWS / "recover-stale-publication-claims.yml").read_text(
+            encoding="utf-8"
+        )
+        marker = "        run: |\n"
+        self.assertIn(marker, workflow)
+        run_script = "\n".join(
+            line[10:] if line.startswith("          ") else line
+            for line in workflow.split(marker, 1)[1].splitlines()
+        )
+        main_marker = '[[ "$EXPECTED_WORKFLOW_COMMIT" =~'
+        self.assertIn(main_marker, run_script)
+        prelude = run_script.split(main_marker, 1)[0]
+
+        if os.name == "nt":
+            bash = (
+                Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+                / "Git"
+                / "bin"
+                / "bash.exe"
+            )
+            bash_path = str(bash) if bash.exists() else None
+        else:
+            bash_path = shutil.which("bash")
+        if not bash_path:
+            self.skipTest("bash is required for the workflow recovery regression")
+
+        harness = prelude + r'''
+mock_state="$INITIAL_STATE"
+az() {
+  printf '%s\n' "$*" >> "$MOCK_LOG"
+  case "$1 $2 $3" in
+    "storage blob exists")
+      if [ "$mock_state" = present ]; then printf '%s\n' true; else printf '%s\n' false; fi
+      ;;
+    "storage blob show")
+      printf '"%s"\n' "$CLAIM_ETAG"
+      ;;
+    "storage blob delete")
+      mock_state=absent
+      return "$DELETE_EXIT"
+      ;;
+    *) return 97 ;;
+  esac
+}
+verify_claim() { printf '%s\n' verified >> "$MOCK_LOG"; }
+claim_state=
+inspect_claim claim_state
+case "$claim_state" in
+  present) delete_claim ;;
+  absent) prove_claim_absent ;;
+  *) die "invalid test claim state" ;;
+esac
+prove_claim_absent
+printf 'initial=%s inspected=%s final=%s\n' "$INITIAL_STATE" "$claim_state" "$mock_state"
+'''
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            directory = Path(temporary)
+            for initial_state in ("absent", "present"):
+                with self.subTest(initial_state=initial_state):
+                    log = directory / f"{initial_state}.log"
+                    environment = os.environ.copy()
+                    environment.update(
+                        {
+                            "PUBLISHER": "eu-eurlex",
+                            "RUNNER_TEMP": directory.as_posix(),
+                            "INITIAL_STATE": initial_state,
+                            "DELETE_EXIT": "1",
+                            "MOCK_LOG": log.as_posix(),
+                        }
+                    )
+                    completed = subprocess.run(
+                        [bash_path],
+                        cwd=ROOT,
+                        env=environment,
+                        input=harness,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(0, completed.returncode, completed.stderr)
+                    commands = log.read_text(encoding="utf-8")
+                    self.assertIn(f"initial={initial_state}", completed.stdout)
+                    self.assertIn(f"inspected={initial_state}", completed.stdout)
+                    self.assertIn("final=absent", completed.stdout)
+                    if initial_state == "absent":
+                        self.assertNotIn("storage blob delete", commands)
+                        self.assertNotIn("verified", commands)
+                    else:
+                        self.assertEqual(1, commands.count("storage blob delete"))
+                        self.assertIn("verified", commands)
+                        self.assertIn(
+                            "--name publication-runs/eu-eurlex/"
+                            "cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c.json "
+                            "--if-match 0x8DEFAEC98CA64E6",
+                            commands,
+                        )
+                        self.assertIn("deletion response was ambiguous", completed.stderr)
+
     def test_exact_eu_staging_metadata_repair_is_bounded_and_conditional(self):
         path = WORKFLOWS / "repair-eu-staging-metadata.yml"
         self.assertTrue(path.exists(), "the reviewed one-time repair workflow is missing")

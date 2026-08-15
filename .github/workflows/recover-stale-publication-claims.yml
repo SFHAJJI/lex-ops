@@ -1,0 +1,381 @@
+name: one-time recover stale publication claims
+
+# One-time recovery for the exact claims left by failed runs 31896356598 and
+# 31896356790. Remove this workflow after its successful audited use.
+on:
+  workflow_dispatch:
+    inputs:
+      workflow_commit:
+        description: Exact protected main commit containing this recovery workflow
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+concurrency:
+  group: lex-production
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    if: >-
+      github.repository == 'SFHAJJI/lex-ops' &&
+      github.ref == 'refs/heads/main' &&
+      github.sha == inputs.workflow_commit
+    strategy:
+      fail-fast: false
+      matrix:
+        publisher: [eu-eurlex, lu-legilux]
+    concurrency:
+      group: publish-prebuilt-${{ matrix.publisher }}
+      cancel-in-progress: false
+    environment: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Azure login with the existing production OIDC identity
+        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Prove frozen state and remove only the exact stale claim
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+          WORKFLOW_COMMIT: ${{ github.sha }}
+          PUBLISHER: ${{ matrix.publisher }}
+        run: |
+          set -euo pipefail
+
+          readonly EXPECTED_REPOSITORY=SFHAJJI/lex-ops
+          readonly EXPECTED_SUBSCRIPTION=7c1e98f3-ef6e-45a0-b61b-a51d436bf093
+          readonly STORAGE_ACCOUNT=stlexindexes
+          readonly STORAGE_CONTAINER=lex
+          readonly FAILED_WORKFLOW_COMMIT=297d84df5dc6c2405c1cd5665fb8d1354f76f013
+          readonly FAILED_WORKFLOW_PATH=.github/workflows/publish-prebuilt-index.yml
+          readonly API=https://api.github.com
+          readonly ARTICLES_COMMIT=ac8851147534b9addfa2231c4364cbd785065841
+          readonly ARTICLES_GENERATION=6a2fb2647dea3ba0b3391e40a0612073c626ef0966bd816cdb8b99b57135c8da
+          readonly BUILD_CODE_COMMIT=27f0e02cb0da8e0fdf9f8322d3eef3b3ae09c776
+          readonly work_root="$RUNNER_TEMP/exact-stale-claim-cleanup-$PUBLISHER"
+          mkdir -p "$work_root"
+
+          case "$PUBLISHER" in
+            eu-eurlex)
+              readonly RUN_ID=31896356598 RUN_NUMBER=9
+              readonly RUN_CREATED=2026-08-15T16:44:42Z RUN_UPDATED=2026-08-15T16:46:03Z
+              readonly CLAIM_NAME=publication-runs/eu-eurlex/cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c.json
+              readonly CLAIM_ETAG=0x8DEFAEC98CA64E6
+              readonly CLAIM_SHA256=7060a32760b8c3b9699b6877b8d1fe6d3cf8cb969bed04338272c97ec50cf80d
+              readonly CLAIM_SIZE=702 CLAIM_MD5='WZm4675MKS5cKSEjIsnQew=='
+              readonly CLAIM_JSON='{"publisher":"eu-eurlex","queue_commit":"49eea0112f42f5e6676f3b0a29d498f07f78c9d3","queue_ticket_id":"cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c","repository":"SFHAJJI/lex-ops","run_id":"31896356598","schema":"lex-prebuilt-publication-run/1","staging":{"index":{"etag":"0x8DEFAEA3A7D4D33","sha256":"f827e089bddff64709926af4341bc0ddbfbef829a5c3e29400754aec3b649fd9","size":589156352},"vectors":{"etag":"0x8DEFAEC4628DF51","sha256":"fb600d1221ab108f5f55f287682844b9f2fa03308c5401ed7d9488ae2544b6ad","size":140342576}},"staging_prefix":"staging/eu-eurlex/cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c","workflow_commit":"297d84df5dc6c2405c1cd5665fb8d1354f76f013"}'
+              readonly POINTER_NAME=current/eu-eurlex.json POINTER_ETAG=0x8DEF9C349323805
+              readonly POINTER_SHA256=a460020a374eaeb7adbcd87fdbeaeb231055e9efd4767422c5940a3f9cf842dc
+              readonly POINTER_SIZE=363 POINTER_MD5='J0B7DCbIW+o8iPJi60mFMQ=='
+              readonly TICKET=cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c
+              readonly PREFIX=staging/eu-eurlex/cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c
+              readonly DB_NAME=$PREFIX/index-eu-eurlex.db DB_ETAG=0x8DEFAEA3A7D4D33
+              readonly DB_SHA256=f827e089bddff64709926af4341bc0ddbfbef829a5c3e29400754aec3b649fd9
+              readonly DB_SIZE=589156352
+              readonly VECTORS_NAME=$PREFIX/index-eu-eurlex.vectors VECTORS_ETAG=0x8DEFAEC4628DF51
+              readonly VECTORS_SHA256=fb600d1221ab108f5f55f287682844b9f2fa03308c5401ed7d9488ae2544b6ad
+              readonly VECTORS_SIZE=140342576 VECTORS_MD5='ZzhDHADQX2tUFEJ3YPrRNg=='
+              readonly CORPUS_COMMIT=e9c4df0981c855855a1a28218cf086ddeb5bb691
+              readonly CORPUS_REPO=SFHAJJI/lex-corpus-eu-eurlex
+              readonly TARGET_TAG=index-eu-eurlex-cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c
+              ;;
+            lu-legilux)
+              readonly RUN_ID=31896356790 RUN_NUMBER=10
+              readonly RUN_CREATED=2026-08-15T16:44:43Z RUN_UPDATED=2026-08-15T16:45:54Z
+              readonly CLAIM_NAME=publication-runs/lu-legilux/f2d4c2ed2b673f9db4abda429ba1451c3be80a4344ab589c86b1a7f29d39819c.json
+              readonly CLAIM_ETAG=0x8DEFAEC95B00B6C
+              readonly CLAIM_SHA256=17098b242d224eeb6f0fd5e2b396e358d21fc4c34396d791df8a62bfdf95d344
+              readonly CLAIM_SIZE=703 CLAIM_MD5='+4jmckBb9npFEgEkBqM9VA=='
+              readonly CLAIM_JSON='{"publisher":"lu-legilux","queue_commit":"4fe7a312aaca42622f81e9c046ddd272660d4d1e","queue_ticket_id":"f2d4c2ed2b673f9db4abda429ba1451c3be80a4344ab589c86b1a7f29d39819c","repository":"SFHAJJI/lex-ops","run_id":"31896356790","schema":"lex-prebuilt-publication-run/1","staging":{"index":{"etag":"0x8DEFAB4AEE3239C","sha256":"fd404e736c29c4d19174ceb2c14667a80270409d222053fee79f0e25e910c0fa","size":717422592},"vectors":{"etag":"0x8DEFAB4AB09F1A2","sha256":"4a4d5fae77d72e74e4c295eb119f15add988cda6fce85b470ca1eb3873b2294b","size":46831856}},"staging_prefix":"staging/lu-legilux/f2d4c2ed2b673f9db4abda429ba1451c3be80a4344ab589c86b1a7f29d39819c","workflow_commit":"297d84df5dc6c2405c1cd5665fb8d1354f76f013"}'
+              readonly POINTER_NAME=current/lu-legilux.json POINTER_ETAG=0x8DEF94A869B8C85
+              readonly POINTER_SHA256=6b25b34ab4e773c9f7b417183dc04dcc813c60ed96571fe636818d914aa215c0
+              readonly POINTER_SIZE=365 POINTER_MD5='k1k8adYTO+gQy1R4TxD6gw=='
+              readonly TICKET=f2d4c2ed2b673f9db4abda429ba1451c3be80a4344ab589c86b1a7f29d39819c
+              readonly PREFIX=staging/lu-legilux/f2d4c2ed2b673f9db4abda429ba1451c3be80a4344ab589c86b1a7f29d39819c
+              readonly DB_NAME=$PREFIX/index-lu-legilux.db DB_ETAG=0x8DEFAB4AEE3239C
+              readonly DB_SHA256=fd404e736c29c4d19174ceb2c14667a80270409d222053fee79f0e25e910c0fa
+              readonly DB_SIZE=717422592
+              readonly VECTORS_NAME=$PREFIX/index-lu-legilux.vectors VECTORS_ETAG=0x8DEFAB4AB09F1A2
+              readonly VECTORS_SHA256=4a4d5fae77d72e74e4c295eb119f15add988cda6fce85b470ca1eb3873b2294b
+              readonly VECTORS_SIZE=46831856 VECTORS_MD5='7UMDe3s4HlrjzNYQuoJZoA=='
+              readonly CORPUS_COMMIT=c087f9153a8cde5429965ffa897db001f3acdf09
+              readonly CORPUS_REPO=SFHAJJI/lex-corpus-lu-legilux
+              readonly TARGET_TAG=index-lu-legilux-f2d4c2ed2b673f9db4abda429ba1451c3be80a4344ab589c86b1a7f29d39819c
+              ;;
+            *) echo "ERROR: unsupported one-time cleanup publisher: $PUBLISHER" >&2; exit 1 ;;
+          esac
+
+          readonly RELEASE_URL=$API/repos/$CORPUS_REPO/releases/tags/$TARGET_TAG
+          readonly TAG_URL=$API/repos/$CORPUS_REPO/git/ref/tags/$TARGET_TAG
+
+          die() { echo "ERROR: $*" >&2; exit 1; }
+          sha256_file() { sha256sum "$1" | cut -d' ' -f1; }
+          size_file() { wc -c < "$1" | tr -d ' '; }
+          normalize_etag() {
+            local value="$1"
+            value=${value#\"}
+            value=${value%\"}
+            printf '%s' "$value"
+          }
+
+          github_get() {
+            local url="$1" output="$2" status
+            if ! status=$(curl --proto '=https' --tlsv1.2 --silent --show-error \
+                --retry 4 --retry-all-errors --connect-timeout 10 --max-time 60 \
+                --header "Authorization: Bearer $GH_TOKEN" \
+                --header 'Accept: application/vnd.github+json' \
+                --header 'X-GitHub-Api-Version: 2026-03-10' \
+                --output "$output" --write-out '%{http_code}' "$url"); then
+              die "GitHub GET failed for $url"
+            fi
+            [ "$status" = 200 ] || die "GitHub GET expected HTTP 200 for $url, got $status"
+          }
+
+          require_github_404() {
+            local url="$1" output="$2" status
+            if ! status=$(curl --proto '=https' --tlsv1.2 --silent --show-error \
+                --retry 4 --retry-all-errors --connect-timeout 10 --max-time 60 \
+                --header "Authorization: Bearer $GH_TOKEN" \
+                --header 'Accept: application/vnd.github+json' \
+                --header 'X-GitHub-Api-Version: 2026-03-10' \
+                --output "$output" --write-out '%{http_code}' "$url"); then
+              die "GitHub absence check failed for $url"
+            fi
+            [ "$status" = 404 ] || die "expected exact HTTP 404 for $url, got $status"
+            jq -e '.message == "Not Found"' "$output" >/dev/null \
+              || die "HTTP 404 body was not GitHub Not Found for $url"
+          }
+
+          verify_failed_run() {
+            local output="$work_root/failed-run.json"
+            github_get "$API/repos/$EXPECTED_REPOSITORY/actions/runs/$RUN_ID" "$output"
+            jq -e --argjson id "$RUN_ID" --argjson number "$RUN_NUMBER" \
+              --arg head "$FAILED_WORKFLOW_COMMIT" --arg path "$FAILED_WORKFLOW_PATH" \
+              --arg created "$RUN_CREATED" --arg updated "$RUN_UPDATED" '
+                .id == $id and .run_number == $number and .run_attempt == 1
+                and .workflow_id == 329614049
+                and .name == "publish-prebuilt-index"
+                and .path == $path and .event == "workflow_dispatch"
+                and .head_branch == "main" and .head_sha == $head
+                and .status == "completed" and .conclusion == "failure"
+                and .created_at == $created and .updated_at == $updated
+              ' "$output" >/dev/null || die "failed run $RUN_ID no longer has the frozen identity"
+          }
+
+          verify_absent_target() {
+            local phase="$1" repository="$work_root/$phase-repository.json"
+            github_get "$API/repos/$CORPUS_REPO" "$repository"
+            jq -e --arg repo "$CORPUS_REPO" '
+                .full_name == $repo and .private == false and .visibility == "public"
+                and .archived == false and .default_branch == "main"
+              ' "$repository" >/dev/null || die "publisher repository identity changed"
+            require_github_404 "$RELEASE_URL" "$work_root/$phase-release.404.json"
+            require_github_404 "$TAG_URL" "$work_root/$phase-tag.404.json"
+          }
+
+          verify_claim() {
+            local observed file="$work_root/claim.json" expected="$work_root/expected-claim.json"
+            if ! observed=$(az storage blob show --auth-mode login --only-show-errors \
+                --account-name "$STORAGE_ACCOUNT" --container-name "$STORAGE_CONTAINER" \
+                --name "$CLAIM_NAME" -o json); then
+              die "exact stale claim became unreadable: $CLAIM_NAME"
+            fi
+            printf '%s' "$observed" | jq -e --arg name "$CLAIM_NAME" --arg etag "$CLAIM_ETAG" \
+              --arg sha "$CLAIM_SHA256" --argjson size "$CLAIM_SIZE" --arg md5 "$CLAIM_MD5" '
+                .name == $name
+                and ((.properties.etag | ltrimstr("\"") | rtrimstr("\"")) == $etag)
+                and .properties.contentLength == $size
+                and .properties.blobType == "BlockBlob"
+                and .properties.serverEncrypted == true
+                and .properties.contentSettings.contentType == "application/json"
+                and .properties.contentSettings.contentMd5 == $md5
+                and .metadata == {sha256:$sha}
+              ' >/dev/null || die "stale claim properties changed: $CLAIM_NAME"
+            az storage blob download --auth-mode login --only-show-errors --overwrite false \
+              --account-name "$STORAGE_ACCOUNT" --container-name "$STORAGE_CONTAINER" \
+              --name "$CLAIM_NAME" --file "$file" --if-match "$CLAIM_ETAG" >/dev/null \
+              || die "conditional stale-claim read failed: $CLAIM_NAME"
+            [ "$(sha256_file "$file")" = "$CLAIM_SHA256" ] \
+              && [ "$(size_file "$file")" = "$CLAIM_SIZE" ] \
+              || die "stale claim bytes changed: $CLAIM_NAME"
+            printf '%s\n' "$CLAIM_JSON" > "$expected"
+            cmp -s "$expected" "$file" || die "stale claim document changed: $CLAIM_NAME"
+          }
+
+          inspect_claim() {
+            local result_name="$1" exists
+            if ! exists=$(az storage blob exists --auth-mode login --only-show-errors \
+                --account-name "$STORAGE_ACCOUNT" --container-name "$STORAGE_CONTAINER" \
+                --name "$CLAIM_NAME" --query exists -o tsv); then
+              die "claim existence check failed: $CLAIM_NAME"
+            fi
+            case "$exists" in
+              true) verify_claim; printf -v "$result_name" '%s' present ;;
+              false) printf -v "$result_name" '%s' absent ;;
+              *) die "claim existence response is malformed: $exists" ;;
+            esac
+          }
+
+          verify_pointer() {
+            local phase="$1" observed file="$work_root/$phase-pointer.json"
+            if ! observed=$(az storage blob show --auth-mode login --only-show-errors \
+                --account-name "$STORAGE_ACCOUNT" --container-name "$STORAGE_CONTAINER" \
+                --name "$POINTER_NAME" -o json); then
+              die "pointer is absent or unreadable: $POINTER_NAME"
+            fi
+            printf '%s' "$observed" | jq -e --arg name "$POINTER_NAME" --arg etag "$POINTER_ETAG" \
+              --argjson size "$POINTER_SIZE" --arg md5 "$POINTER_MD5" '
+                .name == $name
+                and ((.properties.etag | ltrimstr("\"") | rtrimstr("\"")) == $etag)
+                and .properties.contentLength == $size
+                and .properties.blobType == "BlockBlob"
+                and .properties.serverEncrypted == true
+                and .properties.contentSettings.contentType == "application/octet-stream"
+                and .properties.contentSettings.contentMd5 == $md5
+                and .metadata == {}
+              ' >/dev/null || die "pointer properties changed: $POINTER_NAME"
+            az storage blob download --auth-mode login --only-show-errors --overwrite false \
+              --account-name "$STORAGE_ACCOUNT" --container-name "$STORAGE_CONTAINER" \
+              --name "$POINTER_NAME" --file "$file" --if-match "$POINTER_ETAG" >/dev/null \
+              || die "conditional pointer read failed: $POINTER_NAME"
+            [ "$(sha256_file "$file")" = "$POINTER_SHA256" ] \
+              && [ "$(size_file "$file")" = "$POINTER_SIZE" ] \
+              || die "pointer bytes changed: $POINTER_NAME"
+          }
+
+          verify_staging_asset() {
+            local name="$1" expected_etag="$2" expected_sha="$3" expected_size="$4"
+            local content_type="$5" expected_md5="$6" expected_metadata="$7" observed
+            if ! observed=$(az storage blob show --auth-mode login --only-show-errors \
+                --account-name "$STORAGE_ACCOUNT" --container-name "$STORAGE_CONTAINER" \
+                --name "$name" -o json); then
+              die "staging asset is absent or unreadable: $name"
+            fi
+            printf '%s' "$observed" | jq -e --arg name "$name" --arg etag "$expected_etag" \
+              --arg sha "$expected_sha" --argjson size "$expected_size" \
+              --arg content_type "$content_type" --arg md5 "$expected_md5" \
+              --argjson expected_metadata "$expected_metadata" '
+                .name == $name
+                and ((.properties.etag | ltrimstr("\"") | rtrimstr("\"")) == $etag)
+                and .properties.contentLength == $size
+                and .properties.blobType == "BlockBlob"
+                and .properties.serverEncrypted == true
+                and .properties.contentSettings.contentType == $content_type
+                and (if ($md5 | length) == 0
+                  then .properties.contentSettings.contentMd5 == null
+                  else .properties.contentSettings.contentMd5 == $md5 end)
+                and .metadata == $expected_metadata
+                and .metadata.sha256 == $sha
+              ' >/dev/null || die "staging asset identity changed: $name"
+          }
+
+          verify_staging_snapshot() {
+            local inventory expected metadata
+            if ! inventory=$(az storage blob list --auth-mode login --only-show-errors \
+                --account-name "$STORAGE_ACCOUNT" --container-name "$STORAGE_CONTAINER" \
+                --prefix "$PREFIX/" --query '[].name' -o json); then
+              die "staging inventory is unreadable: $PREFIX"
+            fi
+            expected=$(printf '%s\n%s\n' "$DB_NAME" "$VECTORS_NAME" \
+              | sort | jq -Rsc 'split("\n") | map(select(length > 0))')
+            printf '%s' "$inventory" | jq -e --argjson expected "$expected" \
+              'sort == $expected' >/dev/null || die "staging is not the exact frozen two-blob set"
+            metadata=$(jq -cn --arg sha "$DB_SHA256" --arg corpus "$CORPUS_COMMIT" \
+              --arg ticket "$TICKET" --arg articles "$ARTICLES_COMMIT" \
+              --arg generation "$ARTICLES_GENERATION" --arg code "$BUILD_CODE_COMMIT" \
+              --arg collection "$PUBLISHER" '
+                {articles_commit:$articles,articles_generation_sha256:$generation,
+                 build_code_commit:$code,collection:$collection,corpus_commit:$corpus,
+                 queue_ticket_id:$ticket,sha256:$sha}')
+            verify_staging_asset "$DB_NAME" "$DB_ETAG" "$DB_SHA256" "$DB_SIZE" \
+              application/vnd.sqlite3 '' "$metadata"
+            metadata=$(printf '%s' "$metadata" | jq -c --arg sha "$VECTORS_SHA256" '.sha256=$sha')
+            verify_staging_asset "$VECTORS_NAME" "$VECTORS_ETAG" "$VECTORS_SHA256" \
+              "$VECTORS_SIZE" application/octet-stream "$VECTORS_MD5" "$metadata"
+          }
+
+          prove_claim_absent() {
+            local exists
+            case "$CLAIM_NAME" in
+              publication-runs/eu-eurlex/cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c.json|\
+              publication-runs/lu-legilux/f2d4c2ed2b673f9db4abda429ba1451c3be80a4344ab589c86b1a7f29d39819c.json) ;;
+              *) die "invalid claim proof target: $CLAIM_NAME" ;;
+            esac
+            if ! exists=$(az storage blob exists --auth-mode login --only-show-errors \
+                --account-name "$STORAGE_ACCOUNT" --container-name "$STORAGE_CONTAINER" \
+                --name "$CLAIM_NAME" --query exists -o tsv); then
+              die "claim absence proof failed: $CLAIM_NAME"
+            fi
+            [ "$exists" = false ] || die "claim still exists: $CLAIM_NAME"
+          }
+
+          delete_claim() {
+            local observed
+            case "$CLAIM_NAME:$CLAIM_ETAG" in
+              publication-runs/eu-eurlex/cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c.json:0x8DEFAEC98CA64E6|\
+              publication-runs/lu-legilux/f2d4c2ed2b673f9db4abda429ba1451c3be80a4344ab589c86b1a7f29d39819c.json:0x8DEFAEC95B00B6C) ;;
+              *) die "refusing non-allowlisted claim deletion: $CLAIM_NAME" ;;
+            esac
+            if ! observed=$(az storage blob show --auth-mode login --only-show-errors \
+                --account-name "$STORAGE_ACCOUNT" --container-name "$STORAGE_CONTAINER" \
+                --name "$CLAIM_NAME" --query properties.etag -o tsv); then
+              die "exact-present claim disappeared before conditional deletion"
+            fi
+            [ "$(normalize_etag "$observed")" = "$CLAIM_ETAG" ] \
+              || die "claim ETag changed before deletion: $CLAIM_NAME"
+            if ! az storage blob delete --auth-mode login --only-show-errors \
+                --account-name "$STORAGE_ACCOUNT" --container-name "$STORAGE_CONTAINER" \
+                --name "$CLAIM_NAME" --if-match "$CLAIM_ETAG" --output none; then
+              echo "conditional deletion response was ambiguous; requiring exact absence" >&2
+            fi
+            prove_claim_absent
+          }
+
+          [[ "$EXPECTED_WORKFLOW_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+            || die "workflow_commit must be a full lowercase commit"
+          [ "$GITHUB_REPOSITORY" = "$EXPECTED_REPOSITORY" ] \
+            && [ "$GITHUB_REF" = refs/heads/main ] \
+            && [ "$WORKFLOW_COMMIT" = "$EXPECTED_WORKFLOW_COMMIT" ] \
+            && [ "$GITHUB_SHA" = "$EXPECTED_WORKFLOW_COMMIT" ] \
+            || die "recovery is not running from the exact dispatched protected-main commit"
+          [ "$(az account show --query id -o tsv)" = "$EXPECTED_SUBSCRIPTION" ] \
+            || die "OIDC login selected another Azure subscription"
+
+          verify_failed_run
+          verify_absent_target before
+          claim_state=
+          inspect_claim claim_state
+          verify_pointer before
+          verify_staging_snapshot
+
+          case "$claim_state" in
+            present) delete_claim ;;
+            absent) prove_claim_absent ;;
+            *) die "invalid inspected claim state: $claim_state" ;;
+          esac
+
+          verify_absent_target after
+          verify_pointer after
+          verify_staging_snapshot
+          prove_claim_absent
+
+          {
+            echo "### One-time exact stale-claim cleanup: $PUBLISHER verified"
+            echo
+            echo "- Failed run: \`$RUN_ID\`, head \`$FAILED_WORKFLOW_COMMIT\`, path \`$FAILED_WORKFLOW_PATH\`, conclusion \`failure\`."
+            echo "- Frozen claim initial state: \`$claim_state\`; final state: \`absent\`."
+            echo "- Claim: \`$CLAIM_NAME\`, ETag \`$CLAIM_ETAG\`, SHA-256 \`$CLAIM_SHA256\`."
+            echo '- Postflight re-proved the claim absent, target release/tag HTTP 404, pointer byte identity unchanged, and both staged artifacts unchanged.'
+            echo '- No staging, pointer, GitHub release, or Git tag write was issued.'
+          } >> "$GITHUB_STEP_SUMMARY"
