@@ -39,11 +39,175 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  acquire_candidate_ownership:
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      id-token: write
+    environment: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      bootstrap_mode: ${{ steps.acquire.outputs.bootstrap_mode }}
+      candidate_owned: ${{ steps.acquire.outputs.candidate_owned }}
+      evaluation_release_id: ${{ steps.acquire.outputs.evaluation_release_id }}
+      public_retry: ${{ steps.acquire.outputs.public_retry }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EVALUATION_RELEASE: ${{ inputs.evaluation_release }}
+      EVALUATION_REPOSITORY: SFHAJJI/lex-ops
+      CANDIDATE_REVISION: ${{ inputs.candidate_revision }}
+      BOOTSTRAP_ROLLBACK_REVISION: ${{ inputs.bootstrap_rollback_revision }}
+      BOOTSTRAP_CANONICAL_TEMPLATE_DIGEST: ${{ inputs.bootstrap_canonical_template_digest }}
+      BOOTSTRAP_EXPECTED_IMAGE_DIGEST: ${{ inputs.bootstrap_expected_image_digest }}
+      RESOURCE_GROUP: rg-platform
+      CONTAINER_APP: ca-lex-web
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Azure login for read-only candidate acquisition
+        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Acquire durable cleanup ownership before any candidate mutation
+        id: acquire
+        shell: bash
+        run: |
+          set -euo pipefail
+          . scripts/assistant_evaluation_release_contract.sh
+          [[ "$EVALUATION_RELEASE" =~ ^assistant-eval-[0-9a-f]{12}-[0-9a-f]{12}$ ]] \
+            && [[ "$CANDIDATE_REVISION" =~ ^ca-lex-web--[a-z0-9-]+$ ]] \
+            || { echo "::error::candidate acquisition identity is malformed"; exit 2; }
+          supplied=0
+          for value in BOOTSTRAP_ROLLBACK_REVISION \
+              BOOTSTRAP_CANONICAL_TEMPLATE_DIGEST BOOTSTRAP_EXPECTED_IMAGE_DIGEST; do
+            [ -n "${!value}" ] && supplied=$((supplied + 1))
+          done
+          [ "$supplied" = 0 ] || [ "$supplied" = 3 ] \
+            || { echo "::error::bootstrap equivalence inputs must be supplied together"; exit 2; }
+          bootstrap_mode=false
+          if [ "$supplied" = 3 ]; then
+            bootstrap_mode=true
+            [[ "$BOOTSTRAP_ROLLBACK_REVISION" =~ ^ca-lex-web--[a-z0-9-]+$ ]] \
+              && [ "$BOOTSTRAP_ROLLBACK_REVISION" != "$CANDIDATE_REVISION" ] \
+              && [[ "$BOOTSTRAP_CANONICAL_TEMPLATE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
+              && [[ "$BOOTSTRAP_EXPECTED_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
+              || { echo "::error::bootstrap acquisition identity is malformed"; exit 2; }
+          fi
+
+          release_locator="$RUNNER_TEMP/evaluation-release-acquisition.json"
+          gh release view "$EVALUATION_RELEASE" --repo "$EVALUATION_REPOSITORY" \
+            --json databaseId,tagName \
+            > "$release_locator"
+          evaluation_release_id=$(jq -er --arg tag "$EVALUATION_RELEASE" '
+            select(.tagName == $tag)
+            | .databaseId
+            | select(type == "number" and . > 0 and . == floor)
+          ' "$release_locator") \
+            || { echo "::error::candidate acquisition release locator is not exact"; exit 2; }
+          acquired_release="$RUNNER_TEMP/evaluation-release-acquired.json"
+          gh api --method GET -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$EVALUATION_REPOSITORY/releases/$evaluation_release_id" \
+            > "$acquired_release"
+          release_state=$(jq -er --argjson id "$evaluation_release_id" \
+            --arg tag "$EVALUATION_RELEASE" '
+            select(.id == $id and .tag_name == $tag and .target_commitish == "main"
+              and .prerelease == false and (.assets | type) == "array"
+              and ([.assets[].id] | length) == ([.assets[].id] | unique | length)
+              and ([.assets[].name] | length) == ([.assets[].name] | unique | length))
+            | if .draft == true and .immutable == false then "draft"
+            elif .draft == false and .immutable == true then "public"
+            else error("release state is not exact") end
+          ' "$acquired_release") \
+            || { echo "::error::candidate acquisition release state is not exact"; exit 2; }
+          public_retry=false
+          [ "$release_state" = public ] && public_retry=true
+
+          report_asset=$(jq -ec '
+            [.assets[] | select(.name == "assistant-eval-report.json")]
+            | select(length == 1) | .[0]
+            | select((.id | type) == "number" and (.id % 1) == 0 and .id > 0
+                and (.digest | type) == "string"
+                and (.digest | test("^sha256:[0-9a-f]{64}$"))
+                and (.size | type) == "number" and (.size % 1) == 0
+                and .size > 0 and .size <= 4194304 and .state == "uploaded")
+          ' "$acquired_release") \
+            || { echo "::error::candidate acquisition report asset is not exact"; exit 2; }
+          report_asset_id=$(jq -r '.id' <<< "$report_asset")
+          expected_report_size=$(jq -r '.size' <<< "$report_asset")
+          acquired_report="$RUNNER_TEMP/assistant-eval-report.acquired.json"
+          report_asset_digest=$(jq -r '.digest' <<< "$report_asset")
+          expected_report_sha=${report_asset_digest#sha256:}
+          gh api --method GET -H 'Accept: application/octet-stream' \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$EVALUATION_REPOSITORY/releases/assets/$report_asset_id" \
+            > "$acquired_report"
+          actual_report_sha=$(sha256sum "$acquired_report" | cut -d' ' -f1)
+          actual_report_size=$(wc -c < "$acquired_report" | tr -d ' ')
+          [ "$actual_report_sha" = "$expected_report_sha" ] \
+            && [ "$actual_report_size" = "$expected_report_size" ] \
+            || { echo "::error::candidate acquisition report bytes changed"; exit 2; }
+          report_code_commit=$(jq -er --arg candidate "$CANDIDATE_REVISION" '
+            select(.schema == "lex-assistant-eval-report/3"
+              and .activation_gate_passed == true and .gate_failures == []
+              and .identity.target.revision_name == $candidate
+              and (.identity.target.code_commit | type) == "string"
+              and (.identity.target.code_commit | test("^[0-9a-f]{40}$")))
+            | .identity.target.code_commit
+          ' "$acquired_report") \
+            || { echo "::error::candidate acquisition report identity is not exact"; exit 2; }
+          bound_release="assistant-eval-${report_code_commit:0:12}-${actual_report_sha:0:12}"
+          [ "$bound_release" = "$EVALUATION_RELEASE" ] \
+            || { echo "::error::candidate acquisition release does not bind report bytes"; exit 2; }
+
+          candidate_owned=false
+          if [ "$bootstrap_mode" = true ]; then
+            validate_bootstrap_abandonment_prestate "$RESOURCE_GROUP" "$CONTAINER_APP" \
+              "$CANDIDATE_REVISION" "$BOOTSTRAP_ROLLBACK_REVISION" \
+              || { echo "::error::bootstrap acquisition state is not exact A/R/C"; exit 1; }
+            [ "$release_state" = draft ] && candidate_owned=true
+          else
+            candidate_state="$RUNNER_TEMP/evaluation-candidate-acquisition.json"
+            az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+              --revision "$CANDIDATE_REVISION" -o json > "$candidate_state"
+            jq -e --arg candidate "$CANDIDATE_REVISION" '
+              .name == $candidate
+              and (.properties.active | type) == "boolean"
+              and (.properties.trafficWeight // 0) == 0
+            ' "$candidate_state" >/dev/null \
+              || { echo "::error::candidate acquisition refuses a live or malformed revision"; exit 1; }
+            candidate_active=$(jq -r '.properties.active' "$candidate_state")
+            if [ "$release_state" = public ] && [ "$candidate_active" = true ]; then
+              candidate_owned=true
+            elif [ "$release_state" = draft ]; then
+              [ "$candidate_active" = false ] \
+                || { echo "::error::standard acquisition requires inactive C"; exit 1; }
+              candidate_owned=true
+            fi
+          fi
+          echo "bootstrap_mode=$bootstrap_mode" >> "$GITHUB_OUTPUT"
+          echo "candidate_owned=$candidate_owned" >> "$GITHUB_OUTPUT"
+          echo "evaluation_release_id=$evaluation_release_id" >> "$GITHUB_OUTPUT"
+          echo "public_retry=$public_retry" >> "$GITHUB_OUTPUT"
+
+  prepare:
+    needs: acquire_candidate_ownership
     if: github.ref == 'refs/heads/main'
     environment: production
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      bootstrap_mode: ${{ steps.resolve.outputs.bootstrap_mode }}
+      bootstrap_routes_sha256: ${{ steps.stage.outputs.bootstrap_routes_sha256 }}
+      cases_sha256: ${{ steps.identity.outputs.cases_sha256 }}
+      code_commit: ${{ steps.identity.outputs.code_commit }}
+      evaluation_release_id: ${{ steps.resolve.outputs.evaluation_release_id }}
+      public_retry: ${{ steps.resolve.outputs.public_retry }}
+      release_inventory_sha256: ${{ steps.stage.outputs.release_inventory_sha256 }}
     env:
       GH_TOKEN: ${{ github.token }}
       EVALUATION_RELEASE: ${{ inputs.evaluation_release }}
@@ -62,131 +226,19 @@ jobs:
       AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      ACQUIRED_BOOTSTRAP_MODE: ${{ needs.acquire_candidate_ownership.outputs.bootstrap_mode }}
+      ACQUIRED_EVALUATION_RELEASE_ID: ${{ needs.acquire_candidate_ownership.outputs.evaluation_release_id }}
+      ACQUIRED_PUBLIC_RETRY: ${{ needs.acquire_candidate_ownership.outputs.public_retry }}
     steps:
-      - name: Read immutable-release setting at entry
-        shell: bash
-        env:
-          IMMUTABLE_RELEASES_READ_TOKEN: ${{ secrets.IMMUTABLE_RELEASES_READ_TOKEN }}
-        run: |
-          set -euo pipefail
-          [[ -n "${IMMUTABLE_RELEASES_READ_TOKEN:-}" ]] \
-            || { echo "::error::immutable-release setting read credential is unavailable"; exit 1; }
-          output="$RUNNER_TEMP/immutable-release-setting-entry.json"
-          GH_TOKEN="$IMMUTABLE_RELEASES_READ_TOKEN" gh api --method GET \
-            -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$EVALUATION_REPOSITORY/immutable-releases" > "$output"
-          jq -e '
-            type == "object"
-            and .enabled == true
-            and ((.enforced_by_owner | type) == "boolean")
-          ' "$output" >/dev/null \
-            || { echo "::error::Immutable Releases is not enabled exactly"; exit 1; }
-
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Download the exact draft or immutable public evidence
+        id: resolve
         shell: bash
         run: |
           set -euo pipefail
-          EVALUATION_RELEASE_CONTRACT="$RUNNER_TEMP/assistant-evaluation-release-contract.sh"
+          EVALUATION_RELEASE_CONTRACT="$GITHUB_WORKSPACE/scripts/assistant_evaluation_release_contract.sh"
           echo "EVALUATION_RELEASE_CONTRACT=$EVALUATION_RELEASE_CONTRACT" >> "$GITHUB_ENV"
-          cat > "$EVALUATION_RELEASE_CONTRACT" <<'EVALUATION_RELEASE_CONTRACT_SCRIPT'
-          # BEGIN EVALUATION_RELEASE_CONTRACT
-          fetch_release_snapshot() {
-            local output="$1"
-            [[ "${EVALUATION_RELEASE_ID:-}" =~ ^[1-9][0-9]*$ ]] || return 1
-            gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
-              "repos/$EVALUATION_REPOSITORY/releases/$EVALUATION_RELEASE_ID" \
-              > "$output"
-          }
-          validate_release_tag() {
-            local tag_ref="$1"
-            jq -e --arg ref "refs/tags/$EVALUATION_RELEASE" \
-              --arg commit "$WORKFLOW_COMMIT" '
-                .ref == $ref
-                and .object.type == "commit"
-                and .object.sha == $commit
-              ' "$tag_ref" >/dev/null
-          }
-          ensure_release_tag() {
-            local state="$1" tag_ref="$2"
-            local endpoint="repos/$EVALUATION_REPOSITORY/git/ref/tags/$EVALUATION_RELEASE"
-            if gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
-                "$endpoint" > "$tag_ref" 2>/dev/null; then
-              validate_release_tag "$tag_ref"
-              return
-            fi
-            [ "$state" = draft ] || return 1
-            gh api --method POST -H 'X-GitHub-Api-Version: 2026-03-10' \
-              "repos/$EVALUATION_REPOSITORY/git/refs" \
-              -f "ref=refs/tags/$EVALUATION_RELEASE" \
-              -f "sha=$WORKFLOW_COMMIT" >/dev/null 2>&1 || true
-            gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
-              "$endpoint" > "$tag_ref" || return 1
-            validate_release_tag "$tag_ref"
-          }
-          validate_release_snapshot() {
-            local state="$1" root="$2" expected_names="$3" release="$4"
-            local setting="$5" attest="$6"
-            local asset path sha size names inventory inventory_json readback downloaded
-            { [ "$state" = draft ] || [ "$state" = public ]; } \
-              && { [ "$attest" = false ] || [ "$attest" = true ]; } \
-              || return 1
-            jq -e '.enabled == true' "$setting" >/dev/null || return 1
-            jq -e '
-              type == "array" and length > 0 and length == (unique | length)
-              and all(.[]; type == "string" and test("^[A-Za-z0-9._-]+$"))
-            ' "$expected_names" >/dev/null || return 1
-            names="${release}.names"
-            inventory="${release}.assets.jsonl"
-            inventory_json="${release}.assets.json"
-            jq -er '.[]' "$expected_names" | tr -d '\r' > "$names" || return 1
-            : > "$inventory"
-            while IFS= read -r asset; do
-              path="$root/$asset"
-              [ -f "$path" ] || return 1
-              sha=$(sha256sum "$path" | cut -d' ' -f1) || return 1
-              size=$(wc -c < "$path" | tr -d ' ') || return 1
-              jq -cn --arg name "$asset" --arg sha "$sha" --argjson size "$size" \
-                '{name:$name,sha256:$sha,size:$size}' >> "$inventory" || return 1
-            done < "$names"
-            jq -s 'sort_by(.name)' "$inventory" > "$inventory_json" || return 1
-            jq -e --arg state "$state" --arg tag "$EVALUATION_RELEASE" \
-              --arg target main --slurpfile expected "$inventory_json" '
-                .draft == ($state == "draft")
-                and .prerelease == false
-                and .immutable == ($state == "public")
-                and .tag_name == $tag and .target_commitish == $target
-                and ((.assets | type) == "array")
-                and ([.assets[] | {name,digest,size,state}] | sort_by(.name))
-                  == ($expected[0]
-                    | map({name,digest:("sha256:" + .sha256),size,state:"uploaded"})
-                    | sort_by(.name))
-              ' "$release" >/dev/null || return 1
-            [ "$state" = public ] && [ "$attest" = true ] || return 0
-            gh release verify "$EVALUATION_RELEASE" --repo "$EVALUATION_REPOSITORY" \
-              >/dev/null || return 1
-            readback=$(mktemp -d) || return 1
-            while IFS= read -r asset; do
-              path="$root/$asset"
-              gh release verify-asset "$EVALUATION_RELEASE" "$path" \
-                --repo "$EVALUATION_REPOSITORY" >/dev/null || return 1
-              downloaded="$readback/$asset"
-              curl --fail --show-error --silent --location --retry 5 --retry-all-errors \
-                --retry-delay 2 \
-                "https://github.com/$EVALUATION_REPOSITORY/releases/download/$EVALUATION_RELEASE/$asset" \
-                -o "$downloaded" || return 1
-              [ -f "$downloaded" ] \
-                && [ "$(sha256sum "$downloaded" | cut -d' ' -f1)" \
-                  = "$(sha256sum "$path" | cut -d' ' -f1)" ] \
-                && [ "$(wc -c < "$downloaded" | tr -d ' ')" \
-                  = "$(wc -c < "$path" | tr -d ' ')" ] \
-                && cmp --silent "$downloaded" "$path" \
-                || return 1
-            done < "$names"
-          }
-          # END EVALUATION_RELEASE_CONTRACT
-          EVALUATION_RELEASE_CONTRACT_SCRIPT
           . "$EVALUATION_RELEASE_CONTRACT"
           [[ "$EVALUATION_RELEASE" =~ ^assistant-eval-[0-9a-f]{12}-[0-9a-f]{12}$ ]] \
             || { echo "::error::invalid evaluation release tag"; exit 2; }
@@ -211,7 +263,10 @@ jobs:
               && [[ "$BOOTSTRAP_EXPECTED_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
               || { echo "::error::invalid bootstrap equivalence digest"; exit 2; }
           fi
+          [ "$bootstrap_mode" = "$ACQUIRED_BOOTSTRAP_MODE" ] \
+            || { echo "::error::candidate acquisition mode changed"; exit 2; }
           echo "BOOTSTRAP_MODE=$bootstrap_mode" >> "$GITHUB_ENV"
+          echo "bootstrap_mode=$bootstrap_mode" >> "$GITHUB_OUTPUT"
           allowed=$(jq -cn --argjson bootstrap "$bootstrap_mode" '
             [
               "assistant-eval-report.json",
@@ -247,7 +302,10 @@ jobs:
             '
           ) \
             || { echo "::error::evaluation release locator is not exact"; exit 2; }
+          [ "$EVALUATION_RELEASE_ID" = "$ACQUIRED_EVALUATION_RELEASE_ID" ] \
+            || { echo "::error::candidate acquisition release changed"; exit 2; }
           echo "EVALUATION_RELEASE_ID=$EVALUATION_RELEASE_ID" >> "$GITHUB_ENV"
+          echo "evaluation_release_id=$EVALUATION_RELEASE_ID" >> "$GITHUB_OUTPUT"
           entry_release="$RUNNER_TEMP/evaluation-release-entry.json"
           fetch_release_snapshot "$entry_release"
           release_state=$(jq -er --arg tag "$EVALUATION_RELEASE" \
@@ -270,28 +328,19 @@ jobs:
                 else error("evaluation release is not exact") end
             ' "$entry_release") \
             || { echo "::error::evaluation release is not an exact retry-safe release"; exit 2; }
-          [ "$release_state" = public ] \
-            && echo "PUBLIC_RETRY=true" >> "$GITHUB_ENV" \
-            || echo "PUBLIC_RETRY=false" >> "$GITHUB_ENV"
+          if [ "$release_state" = public ]; then
+            public_retry=true
+          else
+            public_retry=false
+          fi
+          [ "$public_retry" = "$ACQUIRED_PUBLIC_RETRY" ] \
+            || { echo "::error::candidate acquisition release state changed"; exit 2; }
+          echo "PUBLIC_RETRY=$public_retry" >> "$GITHUB_ENV"
+          echo "public_retry=$public_retry" >> "$GITHUB_OUTPUT"
           entry_names="$RUNNER_TEMP/evaluation-release-entry-names.json"
-          entry_name_list="$RUNNER_TEMP/evaluation-release-entry-names.txt"
           jq '[.assets[].name] | sort' "$entry_release" > "$entry_names"
-          jq -er '.[]' "$entry_names" | tr -d '\r' > "$entry_name_list"
-          mkdir evidence
-          while IFS= read -r asset; do
-            if [ "$release_state" = draft ]; then
-              gh release download "$EVALUATION_RELEASE" --repo "$EVALUATION_REPOSITORY" \
-                --dir evidence --pattern "$asset"
-            else
-              curl --fail --show-error --silent --location --retry 5 --retry-all-errors \
-                --retry-delay 2 \
-                "https://github.com/$EVALUATION_REPOSITORY/releases/download/$EVALUATION_RELEASE/$asset" \
-                -o "evidence/$asset"
-            fi
-          done < "$entry_name_list"
-          [ "$(find evidence -maxdepth 1 -type f | wc -l)" = "$(jq length "$entry_names")" ] \
+          download_release_assets_by_id evidence "$entry_release" \
             || { echo "::error::evaluation release asset download is incomplete"; exit 1; }
-          entry_setting="$RUNNER_TEMP/immutable-release-setting-entry.json"
           entry_recheck="$RUNNER_TEMP/evaluation-release-entry-recheck.json"
           entry_tag="$RUNNER_TEMP/evaluation-release-entry-tag.json"
           fetch_release_snapshot "$entry_recheck"
@@ -300,7 +349,7 @@ jobs:
             entry_attest=true
           fi
           validate_release_snapshot "$release_state" evidence "$entry_names" \
-            "$entry_recheck" "$entry_setting" "$entry_attest" \
+            "$entry_recheck" "$entry_attest" \
             || { echo "::error::release metadata, attestation, or read-back differs"; exit 1; }
           python3 scripts/assistant_evaluation_identity.py \
             evidence/assistant-eval-report.json \
@@ -357,7 +406,7 @@ jobs:
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Authenticate, sign, verify, and stage the evidence
-        id: prepare
+        id: stage
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -367,19 +416,15 @@ jobs:
           az_reauth
           candidate_owned=false
           cleanup_candidate() {
-            local attempt active
             [ "$candidate_owned" = "true" ] || return 0
             az_reauth || true
-            for attempt in 1 2 3 4 5; do
-              az containerapp revision deactivate -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
-                --revision "$CANDIDATE_REVISION" >/dev/null 2>&1 || true
-              active=$(az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
-                --revision "$CANDIDATE_REVISION" --query properties.active -o tsv 2>/dev/null || true)
-              [ "$active" = "false" ] && return 0
-              sleep "$attempt"
-            done
-            echo "::error::candidate revision could not be returned to inactive state"
-            return 1
+            if [ "$BOOTSTRAP_MODE" = true ]; then
+              validate_bootstrap_abandonment_prestate "$RESOURCE_GROUP" "$CONTAINER_APP" \
+                "$CANDIDATE_REVISION" "$BOOTSTRAP_ROLLBACK_REVISION" \
+                || { echo "::error::bootstrap state drifted; retain C for explicit recovery"; return 1; }
+            fi
+            deactivate_zero_traffic_candidate "$RESOURCE_GROUP" "$CONTAINER_APP" "$CANDIDATE_REVISION" \
+              || { echo "::error::candidate revision could not be safely deactivated"; return 1; }
           }
           finish() {
             local status=$?
@@ -413,7 +458,6 @@ jobs:
               # standard candidate cleanup; bootstrap C must remain active for promotion.
               if [ "$candidate_active" = "true" ]; then
                 candidate_owned=true
-                echo "candidate_owned=true" >> "$GITHUB_OUTPUT"
               fi
             fi
             dotnet run --project lex/src/Lex.Ingest/Lex.Ingest.csproj -c Release -- \
@@ -444,7 +488,6 @@ jobs:
                 --image-digest "$BOOTSTRAP_EXPECTED_IMAGE_DIGEST" \
                 --cases-sha256 "$CASES_SHA"
             fi
-            echo "candidate_owned=$candidate_owned" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ "$BOOTSTRAP_MODE" = "true" ]; then
@@ -453,12 +496,10 @@ jobs:
             # A failed bootstrap publication abandons this pair by deactivating C under max=1.
             # Keep ownership through every reversible pre-publish check.
             candidate_owned=true
-            echo "candidate_owned=true" >> "$GITHUB_OUTPUT"
           else
             [ "$candidate_active" = "false" ] \
               || { echo "::error::publication must own activation of an inactive candidate"; exit 1; }
             candidate_owned=true
-            echo "candidate_owned=true" >> "$GITHUB_OUTPUT"
             az_retry az containerapp revision activate -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
               --revision "$CANDIDATE_REVISION" >/dev/null
           fi
@@ -739,9 +780,11 @@ jobs:
             # before the irreversible public-release boundary, then verify the signed package
             # against that fresh snapshot.
             az_retry az containerapp revision list -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
-              --all -o json | jq -S 'sort_by(.name)' > evidence/bootstrap-routes.readback.json
-            jq -S 'sort_by(.name)' evidence/bootstrap-routes.live.json \
-              > evidence/bootstrap-routes.expected.json
+              --all -o json > evidence/bootstrap-routes.readback.raw.json
+            canonicalize_revision_routes evidence/bootstrap-routes.live.json \
+              evidence/bootstrap-routes.expected.json
+            canonicalize_revision_routes evidence/bootstrap-routes.readback.raw.json \
+              evidence/bootstrap-routes.readback.json
             cmp --silent evidence/bootstrap-routes.expected.json \
               evidence/bootstrap-routes.readback.json \
               || { echo "::error::bootstrap A/R/C state changed before publication"; exit 1; }
@@ -760,134 +803,253 @@ jobs:
               --canonical-template-digest "$BOOTSTRAP_CANONICAL_TEMPLATE_DIGEST" \
               --image-digest "$BOOTSTRAP_EXPECTED_IMAGE_DIGEST" \
               --cases-sha256 "$CASES_SHA"
+            bootstrap_routes_sha256=$(sha256sum evidence/bootstrap-routes.expected.json \
+              | cut -d' ' -f1)
+            [[ "$bootstrap_routes_sha256" =~ ^[0-9a-f]{64}$ ]] \
+              || { echo "::error::bootstrap route inventory digest is invalid"; exit 1; }
+            echo "bootstrap_routes_sha256=$bootstrap_routes_sha256" >> "$GITHUB_OUTPUT"
           fi
           release_names="$RUNNER_TEMP/evaluation-release-names.json"
           printf '%s\n' "${release_assets[@]##*/}" \
             | jq -Rsc 'split("\n") | map(select(length > 0)) | sort' > "$release_names"
+          staged_release="$RUNNER_TEMP/evaluation-release-staged.json"
+          staged_tag="$RUNNER_TEMP/evaluation-release-staged-tag.json"
+          fetch_release_snapshot "$staged_release"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$EVALUATION_REPOSITORY/git/ref/tags/$EVALUATION_RELEASE" > "$staged_tag"
+          validate_release_snapshot draft evidence "$release_names" "$staged_release" false \
+            && validate_release_tag "$staged_tag" \
+            || { echo "::error::staged draft release is not exact"; exit 1; }
+          release_inventory_sha256=$(jq -cS \
+            '[.assets[] | {name,digest,size,state}] | sort_by(.name)' "$staged_release" \
+            | sha256sum | cut -d' ' -f1)
+          [[ "$release_inventory_sha256" =~ ^[0-9a-f]{64}$ ]] \
+            || { echo "::error::staged release inventory digest is invalid"; exit 1; }
+          echo "release_inventory_sha256=$release_inventory_sha256" >> "$GITHUB_OUTPUT"
 
-      - name: Recheck immutable-release setting before publication
-        if: env.PUBLIC_RETRY != 'true'
+      - name: Export the prepared evaluation identity
+        id: identity
         shell: bash
-        env:
-          IMMUTABLE_RELEASES_READ_TOKEN: ${{ secrets.IMMUTABLE_RELEASES_READ_TOKEN }}
         run: |
           set -euo pipefail
-          [[ -n "${IMMUTABLE_RELEASES_READ_TOKEN:-}" ]] \
+          [[ "$CODE_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+            && [[ "$CASES_SHA" =~ ^[0-9a-f]{64}$ ]] \
+            || { echo "::error::prepared evaluation identity is malformed"; exit 1; }
+          echo "code_commit=$CODE_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "cases_sha256=$CASES_SHA" >> "$GITHUB_OUTPUT"
+
+  immutable_prepublication:
+    needs: prepare
+    if: needs.prepare.outputs.public_retry != 'true'
+    permissions: {}
+    environment: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Recheck immutable-release setting before publication
+        shell: /usr/bin/bash --noprofile --norc -euo pipefail {0}
+        env:
+          BASH_ENV: /dev/null
+          PATH: /usr/bin:/bin
+          LEX_OPS_TOKEN: ${{ secrets.LEX_OPS_TOKEN }}
+        run: |
+          [[ -n "${LEX_OPS_TOKEN:-}" ]] \
             || { echo "::error::immutable-release setting read credential is unavailable"; exit 1; }
-          output="$RUNNER_TEMP/immutable-release-setting-prepublish.json"
-          GH_TOKEN="$IMMUTABLE_RELEASES_READ_TOKEN" gh api --method GET \
+          response="$RUNNER_TEMP/immutable-release-setting.json"
+          GH_TOKEN="$LEX_OPS_TOKEN" /usr/bin/gh api --method GET \
+            -H 'Accept: application/vnd.github+json' \
             -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$EVALUATION_REPOSITORY/immutable-releases" > "$output"
-          jq -e '
+            'repos/SFHAJJI/lex-ops/immutable-releases' > "$response"
+          unset LEX_OPS_TOKEN
+          /usr/bin/jq -e '
             type == "object"
             and .enabled == true
             and ((.enforced_by_owner | type) == "boolean")
-          ' "$output" >/dev/null \
+          ' "$response" >/dev/null \
             || { echo "::error::Immutable Releases is not enabled immediately before publication"; exit 1; }
 
-      - name: Publish the exact immutable evidence
+  publish:
+    needs: [prepare, immutable_prepublication]
+    if: needs.prepare.outputs.public_retry != 'true'
+    permissions:
+      contents: write
+      id-token: write
+    environment: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      publication_attempted: ${{ steps.publish.outputs.publication_attempted }}
+      published: ${{ steps.publish.outputs.published }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EVALUATION_RELEASE: ${{ inputs.evaluation_release }}
+      EVALUATION_RELEASE_ID: ${{ needs.prepare.outputs.evaluation_release_id }}
+      EVALUATION_REPOSITORY: SFHAJJI/lex-ops
+      EXPECTED_RELEASE_INVENTORY_SHA256: ${{ needs.prepare.outputs.release_inventory_sha256 }}
+      WORKFLOW_COMMIT: ${{ github.sha }}
+      CODE_COMMIT: ${{ needs.prepare.outputs.code_commit }}
+      CANDIDATE_REVISION: ${{ inputs.candidate_revision }}
+      BOOTSTRAP_MODE: ${{ needs.prepare.outputs.bootstrap_mode }}
+      EXPECTED_BOOTSTRAP_ROUTES_SHA256: ${{ needs.prepare.outputs.bootstrap_routes_sha256 }}
+      BOOTSTRAP_ROLLBACK_REVISION: ${{ inputs.bootstrap_rollback_revision }}
+      RESOURCE_GROUP: rg-platform
+      CONTAINER_APP: ca-lex-web
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Azure login for bounded candidate cleanup
+        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Publish only the pinned release ID
         id: publish
-        if: env.PUBLIC_RETRY != 'true'
         shell: bash
         run: |
           set -Eeuo pipefail
-          . "$EVALUATION_RELEASE_CONTRACT"
-          . lex/scripts/deploy/az-retry.sh
-          . lex/scripts/deploy/az-reauth.sh
+          . scripts/assistant_evaluation_release_contract.sh
           candidate_owned=true
           cleanup_candidate() {
-            local attempt active
-            [ "$candidate_owned" = "true" ] || return 0
-            [ ! -f "$RUNNER_TEMP/bootstrap-publication-cleanup-relinquished" ] \
-              || return 0
-            az_reauth || true
-            for attempt in 1 2 3 4 5; do
-              az containerapp revision deactivate -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
-                --revision "$CANDIDATE_REVISION" >/dev/null 2>&1 || true
-              active=$(az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
-                --revision "$CANDIDATE_REVISION" --query properties.active -o tsv 2>/dev/null || true)
-              [ "$active" = "false" ] && return 0
-              sleep "$attempt"
-            done
-            echo "::error::candidate revision could not be returned to inactive state"
-            return 1
+            [ "$candidate_owned" = true ] || return 0
+            if [ "$BOOTSTRAP_MODE" = true ]; then
+              validate_bootstrap_abandonment_prestate "$RESOURCE_GROUP" "$CONTAINER_APP" \
+                "$CANDIDATE_REVISION" "$BOOTSTRAP_ROLLBACK_REVISION" \
+                || { echo "::error::bootstrap state drifted; retain C for explicit recovery"; return 1; }
+            fi
+            deactivate_zero_traffic_candidate "$RESOURCE_GROUP" "$CONTAINER_APP" "$CANDIDATE_REVISION" \
+              || { echo "::error::candidate revision could not be safely deactivated"; return 1; }
           }
           finish() {
             local status=$?
             trap - EXIT TERM INT
-            if [ "$status" -ne 0 ]; then
-              cleanup_candidate || status=1
-            fi
+            cleanup_candidate || status=1
             exit "$status"
           }
           trap finish EXIT TERM INT
-          echo "candidate_owned=true" >> "$GITHUB_OUTPUT"
+          echo "publication_attempted=false" >> "$GITHUB_OUTPUT"
+          [[ "$EVALUATION_RELEASE_ID" =~ ^[1-9][0-9]*$ ]] \
+            && [[ "$WORKFLOW_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+            && [[ "$CODE_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+            && [[ "$EXPECTED_RELEASE_INVENTORY_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+            && { [ "$BOOTSTRAP_MODE" = false ] || [ "$BOOTSTRAP_MODE" = true ]; } \
+            || { echo "::error::prepared publication identity is malformed"; exit 1; }
           release_names="$RUNNER_TEMP/evaluation-release-names.json"
-          prepublish_setting="$RUNNER_TEMP/immutable-release-setting-prepublish.json"
+          write_expected_release_names "$BOOTSTRAP_MODE" "$release_names"
+          release_notes="Signed production release evidence for candidate revision $CANDIDATE_REVISION. Promotion independently revalidates this package against Azure and the live candidate attestation."
+          if [ "$BOOTSTRAP_MODE" = true ]; then
+            release_notes="$release_notes Bootstrap fallback $BOOTSTRAP_ROLLBACK_REVISION is a signed canonical-template/image equivalent first-release fallback; it is not independently evaluated."
+          fi
+          release_title="Lex assistant evaluation ${CODE_COMMIT:0:12}"
+          publish_payload="$RUNNER_TEMP/release-publish-payload.json"
+          jq -cn --arg name "$release_title" --arg body "$release_notes" \
+            '{name:$name,body:$body,draft:false,prerelease:false,make_latest:"false"}' \
+            > "$publish_payload"
+          publication_state="$RUNNER_TEMP/publication-state.json"
+          if [ "$BOOTSTRAP_MODE" = true ]; then
+            [[ "$EXPECTED_BOOTSTRAP_ROUTES_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+              || { echo "::error::prepared bootstrap route identity is malformed"; exit 1; }
+            az containerapp revision list -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+              --all -o json > "${publication_state}.raw"
+            canonicalize_revision_routes "${publication_state}.raw" "$publication_state"
+            publication_routes_sha256=$(sha256sum "$publication_state" | cut -d' ' -f1)
+            [ "$publication_routes_sha256" = "$EXPECTED_BOOTSTRAP_ROUTES_SHA256" ] \
+              || { echo "::error::bootstrap A/R/C state changed before publication"; exit 1; }
+          else
+            [ -z "$EXPECTED_BOOTSTRAP_ROUTES_SHA256" ] \
+              || { echo "::error::standard publication received bootstrap route identity"; exit 1; }
+            az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+              --revision "$CANDIDATE_REVISION" -o json > "$publication_state"
+            jq -e --arg candidate "$CANDIDATE_REVISION" '
+              .name == $candidate
+              and .properties.active == true
+              and (.properties.trafficWeight // 0) == 0
+            ' "$publication_state" >/dev/null \
+              || { echo "::error::standard candidate changed before publication"; exit 1; }
+          fi
           prepublish_release="$RUNNER_TEMP/evaluation-release-prepublish.json"
           prepublish_tag="$RUNNER_TEMP/evaluation-release-prepublish-tag.json"
           fetch_release_snapshot "$prepublish_release"
           gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
             "repos/$EVALUATION_REPOSITORY/git/ref/tags/$EVALUATION_RELEASE" > "$prepublish_tag"
-          validate_release_snapshot draft evidence "$release_names" \
-            "$prepublish_release" "$prepublish_setting" false \
+          jq -e --slurpfile expected "$release_names" \
+            --arg tag "$EVALUATION_RELEASE" --arg target main '
+              .draft == true and .immutable == false and .prerelease == false
+              and .tag_name == $tag and .target_commitish == $target
+              and ([.assets[].name] | sort) == $expected[0]
+              and all(.assets[];
+                (.digest | type) == "string"
+                and (.digest | test("^sha256:[0-9a-f]{64}$"))
+                and (.size | type) == "number" and (.size % 1 == 0) and .size >= 0
+                and .state == "uploaded")
+            ' "$prepublish_release" >/dev/null \
             && validate_release_tag "$prepublish_tag" \
             || { echo "::error::draft release changed immediately before publication"; exit 1; }
-          if [ "$BOOTSTRAP_MODE" = "true" ]; then
-            # The publish API may succeed even if the runner is cancelled before its response is
-            # observed. Relinquish cleanup ownership before that ambiguous boundary so public
-            # signed evidence can never be followed by automatic C deactivation and R purging.
-            : > "$RUNNER_TEMP/bootstrap-publication-cleanup-relinquished"
+          release_inventory_sha256=$(jq -cS \
+            '[.assets[] | {name,digest,size,state}] | sort_by(.name)' "$prepublish_release" \
+            | sha256sum | cut -d' ' -f1)
+          [ "$release_inventory_sha256" = "$EXPECTED_RELEASE_INVENTORY_SHA256" ] \
+            || { echo "::error::draft release inventory differs from staged evidence"; exit 1; }
+          if [ "$BOOTSTRAP_MODE" = true ]; then
+            # From the next API command onward success is ambiguous under cancellation. Bootstrap
+            # C must remain active so an already-public package cannot lose its promotion target.
             candidate_owned=false
-            echo "candidate_owned=false" >> "$GITHUB_OUTPUT"
           fi
-          release_notes="Signed production release evidence for candidate revision $CANDIDATE_REVISION. Promotion independently revalidates this package against Azure and the live candidate attestation."
-          if [ "$BOOTSTRAP_MODE" = "true" ]; then
-            release_notes="$release_notes Bootstrap fallback $BOOTSTRAP_ROLLBACK_REVISION is a signed canonical-template/image equivalent first-release fallback; it is not independently evaluated."
-          fi
-          gh release edit "$EVALUATION_RELEASE" --draft=false --latest=false \
-            --repo "$EVALUATION_REPOSITORY" \
-            --title "Lex assistant evaluation ${CODE_COMMIT:0:12}" \
-            --notes "$release_notes"
+          echo "publication_attempted=true" >> "$GITHUB_OUTPUT"; \
+            gh api --method PATCH -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$EVALUATION_REPOSITORY/releases/$EVALUATION_RELEASE_ID" \
+              --input "$publish_payload" > "$RUNNER_TEMP/evaluation-release-published-response.json"
+          jq -e --argjson id "$EVALUATION_RELEASE_ID" --arg tag "$EVALUATION_RELEASE" '
+            .id == $id and .tag_name == $tag and .draft == false and .prerelease == false
+          ' "$RUNNER_TEMP/evaluation-release-published-response.json" >/dev/null \
+            || { echo "::error::pinned release publication response is not exact"; exit 1; }
+          echo "published=true" >> "$GITHUB_OUTPUT"
 
-      - name: Recheck immutable-release setting after publication
-        if: env.PUBLIC_RETRY != 'true'
+  verify:
+    needs: [prepare, publish]
+    if: >-
+      always()
+      && needs.prepare.result == 'success'
+      && needs.prepare.outputs.public_retry != 'true'
+      && needs.publish.result != 'skipped'
+      && needs.publish.outputs.publication_attempted != 'false'
+    permissions:
+      attestations: read
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EVALUATION_RELEASE: ${{ inputs.evaluation_release }}
+      EVALUATION_RELEASE_ID: ${{ needs.prepare.outputs.evaluation_release_id }}
+      EVALUATION_REPOSITORY: SFHAJJI/lex-ops
+      WORKFLOW_COMMIT: ${{ github.sha }}
+      CODE_COMMIT: ${{ needs.prepare.outputs.code_commit }}
+      CANDIDATE_REVISION: ${{ inputs.candidate_revision }}
+      BOOTSTRAP_MODE: ${{ needs.prepare.outputs.bootstrap_mode }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Verify the published immutable evidence by release ID
         shell: bash
-        env:
-          IMMUTABLE_RELEASES_READ_TOKEN: ${{ secrets.IMMUTABLE_RELEASES_READ_TOKEN }}
         run: |
           set -euo pipefail
-          [[ -n "${IMMUTABLE_RELEASES_READ_TOKEN:-}" ]] \
-            || { echo "::error::immutable-release setting read credential is unavailable"; exit 1; }
-          output="$RUNNER_TEMP/immutable-release-setting-published.json"
-          GH_TOKEN="$IMMUTABLE_RELEASES_READ_TOKEN" gh api --method GET \
-            -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$EVALUATION_REPOSITORY/immutable-releases" > "$output"
-          jq -e '
-            type == "object"
-            and .enabled == true
-            and ((.enforced_by_owner | type) == "boolean")
-          ' "$output" >/dev/null \
-            || { echo "::error::Immutable Releases is not enabled immediately after publication"; exit 1; }
-
-      - name: Verify the published immutable evidence
-        if: env.PUBLIC_RETRY != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          . "$EVALUATION_RELEASE_CONTRACT"
+          . scripts/assistant_evaluation_release_contract.sh
           release_names="$RUNNER_TEMP/evaluation-release-names.json"
-          published_setting="$RUNNER_TEMP/immutable-release-setting-published.json"
+          write_expected_release_names "$BOOTSTRAP_MODE" "$release_names"
           release_verified=false
           for attempt in {1..12}; do
-            published_release="$RUNNER_TEMP/evaluation-release-published.json"
-            published_tag="$RUNNER_TEMP/evaluation-release-published-tag.json"
+            published_release="$RUNNER_TEMP/evaluation-release-published-$attempt.json"
+            published_tag="$RUNNER_TEMP/evaluation-release-published-tag-$attempt.json"
+            evidence="$RUNNER_TEMP/evidence-$attempt"
             if fetch_release_snapshot "$published_release" \
+              && download_release_assets_by_id "$evidence" "$published_release" \
               && gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
                 "repos/$EVALUATION_REPOSITORY/git/ref/tags/$EVALUATION_RELEASE" \
                 > "$published_tag" \
-              && validate_release_snapshot public evidence "$release_names" \
-                "$published_release" "$published_setting" true \
+              && validate_release_snapshot public "$evidence" "$release_names" \
+                "$published_release" true \
               && validate_release_tag "$published_tag"; then
               release_verified=true
               break
@@ -897,45 +1059,6 @@ jobs:
           done
           [ "$release_verified" = true ] \
             || { echo "::error::published release never became immutable and exact"; exit 1; }
-
-      - name: Always restore one active quota authority
-        if: >-
-          always()
-          && steps.prepare.outputs.candidate_owned == 'true'
-          && steps.publish.outputs.candidate_owned != 'false'
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -f "$RUNNER_TEMP/bootstrap-publication-cleanup-relinquished" ]; then
-            echo "candidate cleanup authority was relinquished before publication"
-            exit 0
-          fi
-          . lex/scripts/deploy/az-retry.sh
-          . lex/scripts/deploy/az-reauth.sh
-          az_reauth
-          for attempt in 1 2 3 4 5; do
-            az containerapp revision deactivate -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
-              --revision "$CANDIDATE_REVISION" >/dev/null 2>&1 || true
-            active=$(az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
-              --revision "$CANDIDATE_REVISION" --query properties.active -o tsv 2>/dev/null || true)
-            [ "$active" = "false" ] && break
-            [ "$attempt" = "5" ] \
-              && { echo "::error::candidate remains an active quota authority"; exit 1; }
-            sleep "$attempt"
-          done
-          active_count=$(az containerapp revision list -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" --all \
-            --query "[?properties.active==\`true\`] | length(@)" -o tsv)
-          [ "$active_count" = "1" ] \
-            || { echo "::error::expected exactly one active revision, found $active_count"; exit 1; }
-          if [ "$BOOTSTRAP_MODE" = "true" ]; then
-            az containerapp revision list -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
-              --all -o json | jq -e --arg candidate "$CANDIDATE_REVISION" '
-                length == 2
-                and ([.[] | select(.properties.active == false) | .name] == [$candidate])
-                and ([.[] | select(.properties.active == true
-                  and (.properties.trafficWeight // 0) == 100)] | length) == 1' >/dev/null \
-              || { echo "::error::bootstrap abandonment did not retain exact A plus inactive C"; exit 1; }
-          fi
 
       - name: Publication summary
         shell: bash
@@ -949,8 +1072,126 @@ jobs:
             echo "- project-owner review signature: verified"
             echo "- Azure target and model identities: verified"
             echo "- whole-evidence Key Vault signature: verified"
-            if [ "$BOOTSTRAP_MODE" = "true" ]; then
+            if [ "$BOOTSTRAP_MODE" = true ]; then
               echo "- bounded bootstrap state: A active/100, R inactive/0, C active/0"
               echo "- C must be promoted or explicitly abandoned before signed evidence expires"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+  restore_candidate_if_unpublished:
+    needs: [acquire_candidate_ownership, prepare, immutable_prepublication, publish]
+    if: >-
+      always()
+      && needs.acquire_candidate_ownership.result == 'success'
+      && needs.acquire_candidate_ownership.outputs.candidate_owned == 'true'
+      && needs.publish.result != 'success'
+    permissions:
+      contents: read
+      id-token: write
+    environment: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EVALUATION_RELEASE: ${{ inputs.evaluation_release }}
+      EVALUATION_RELEASE_ID: ${{ needs.acquire_candidate_ownership.outputs.evaluation_release_id }}
+      EVALUATION_REPOSITORY: SFHAJJI/lex-ops
+      CANDIDATE_REVISION: ${{ inputs.candidate_revision }}
+      BOOTSTRAP_MODE: ${{ needs.acquire_candidate_ownership.outputs.bootstrap_mode }}
+      BOOTSTRAP_ROLLBACK_REVISION: ${{ inputs.bootstrap_rollback_revision }}
+      PUBLICATION_ATTEMPTED: ${{ needs.publish.outputs.publication_attempted }}
+      PUBLISH_RESULT: ${{ needs.publish.result }}
+      RESOURCE_GROUP: rg-platform
+      CONTAINER_APP: ca-lex-web
+    steps:
+      - name: Azure login for exact abandonment cleanup
+        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Restore one active quota authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$BOOTSTRAP_MODE" = true ]; then
+            if { [ "$PUBLISH_RESULT" = failure ] \
+                && [ "$PUBLICATION_ATTEMPTED" = false ]; } \
+              || [ "$PUBLISH_RESULT" = skipped ]; then
+              [[ "$EVALUATION_RELEASE_ID" =~ ^[1-9][0-9]*$ ]] \
+                || { echo "::error::retain bootstrap C for explicit recovery: release ID is unknown"; exit 1; }
+              cleanup_release="$RUNNER_TEMP/bootstrap-cleanup-release.json"
+              gh api -H 'Accept: application/vnd.github+json' \
+                -H 'X-GitHub-Api-Version: 2026-03-10' \
+                "repos/$EVALUATION_REPOSITORY/releases/$EVALUATION_RELEASE_ID" \
+                > "$cleanup_release" \
+                || { echo "::error::retain bootstrap C for explicit recovery: release state is unreadable"; exit 1; }
+              jq -e --argjson id "$EVALUATION_RELEASE_ID" \
+                --arg tag "$EVALUATION_RELEASE" '
+                  .id == $id and .tag_name == $tag
+                  and .draft == true and .immutable == false and .prerelease == false
+                ' "$cleanup_release" >/dev/null \
+                || { echo "::error::retain bootstrap C for explicit recovery: release is not an exact draft"; exit 1; }
+            else
+              echo "::error::retain bootstrap C for explicit recovery: publication outcome is ambiguous"
+              exit 1
+            fi
+            bootstrap_app_state="$RUNNER_TEMP/bootstrap-cleanup-app.json"
+            bootstrap_routes="$RUNNER_TEMP/bootstrap-cleanup-routes.json"
+            az containerapp show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" -o json \
+              > "$bootstrap_app_state"
+            jq -e '.properties.configuration.maxInactiveRevisions == 1' \
+              "$bootstrap_app_state" >/dev/null \
+              || { echo "::error::retain bootstrap C: maxInactiveRevisions is not 1"; exit 1; }
+            az containerapp revision list -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+              --all -o json > "$bootstrap_routes"
+            jq -e --arg candidate "$CANDIDATE_REVISION" \
+              --arg rollback "$BOOTSTRAP_ROLLBACK_REVISION" '
+                length == 3
+                and ([.[] | select(.properties.active == false) | .name] == [$rollback])
+                and ([.[] | select(.properties.active == true)] | length) == 2
+                and (any(.[]; .name == $candidate and .properties.active == true
+                  and (.properties.trafficWeight // 0) == 0))
+                and (any(.[]; .name == $rollback and .properties.active == false
+                  and (.properties.trafficWeight // 0) == 0))
+                and ([.[] | select((.properties.trafficWeight // 0) > 0)] | length) == 1
+                and ([.[] | select((.properties.trafficWeight // 0) == 100
+                  and .properties.active == true
+                  and .name != $candidate and .name != $rollback)] | length) == 1
+              ' "$bootstrap_routes" >/dev/null \
+              || { echo "::error::retain bootstrap C: pre-abandonment A/R/C state drifted"; exit 1; }
+          fi
+          for attempt in {1..6}; do
+            cleanup_state="$RUNNER_TEMP/candidate-cleanup-state.json"
+            az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+              --revision "$CANDIDATE_REVISION" -o json > "$cleanup_state" \
+              || { echo "::error::candidate cleanup state is unreadable"; exit 1; }
+            jq -e --arg candidate "$CANDIDATE_REVISION" '
+              .name == $candidate
+              and (.properties.active | type) == "boolean"
+              and (.properties.trafficWeight // 0) == 0
+            ' "$cleanup_state" >/dev/null \
+              || { echo "::error::refusing to deactivate a live or malformed revision"; exit 1; }
+            active=$(jq -r '.properties.active' "$cleanup_state")
+            [ "$active" = false ] && break
+            [ "$attempt" = 6 ] \
+              && { echo "::error::candidate remains an active quota authority"; exit 1; }
+            az containerapp revision deactivate -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+              --revision "$CANDIDATE_REVISION" >/dev/null 2>&1 || true
+            sleep "$attempt"
+          done
+          active_count=$(az containerapp revision list -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+            --all --query "[?properties.active==\`true\`] | length(@)" -o tsv)
+          [ "$active_count" = 1 ] \
+            || { echo "::error::expected exactly one active revision, found $active_count"; exit 1; }
+          if [ "$BOOTSTRAP_MODE" = true ]; then
+            az containerapp revision list -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+              --all -o json | jq -e --arg candidate "$CANDIDATE_REVISION" '
+                length == 2
+                and ([.[] | select(.properties.active == false) | .name] == [$candidate])
+                and ([.[] | select(.properties.active == true
+                  and (.properties.trafficWeight // 0) == 100)] | length) == 1
+              ' >/dev/null \
+              || { echo "::error::bootstrap abandonment did not retain exact A plus inactive C"; exit 1; }
+          fi

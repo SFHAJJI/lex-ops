@@ -14,6 +14,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 IDENTITY_SCRIPT = ROOT / "scripts" / "assistant_evaluation_identity.py"
+RELEASE_CONTRACT = ROOT / "scripts" / "assistant_evaluation_release_contract.sh"
 
 
 class WorkflowContractTests(unittest.TestCase):
@@ -496,7 +497,7 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
         self.assertIn("not independently evaluated", workflow)
         self.assertIn("bootstrap signing state is not exact A=100/R-inactive/C-active", workflow)
         self.assertIn("bootstrap chronology must be exact A < R < C", workflow)
-        self.assertIn('echo "candidate_owned=false" >> "$GITHUB_OUTPUT"', workflow)
+        self.assertIn("candidate_owned=false", workflow)
 
     def test_every_revision_list_uses_complete_azure_inventory(self):
         workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(
@@ -511,26 +512,26 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
 
     def test_evaluation_publication_reads_draft_and_public_assets_exactly(self):
         workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(encoding="utf-8")
+        contract = RELEASE_CONTRACT.read_text(encoding="utf-8")
         publication = workflow.index('gh release upload "$EVALUATION_RELEASE"')
-        publish_boundary = workflow.index('gh release edit "$EVALUATION_RELEASE"', publication)
+        prepublication = workflow.index("  immutable_prepublication:\n", publication)
+        publish_boundary = workflow.index("gh api --method PATCH", prepublication)
         final_state = workflow.index("for attempt in {1..12}", publish_boundary)
-        readback = workflow.index("validate_release_snapshot public evidence", final_state)
+        readback = workflow.index("validate_release_snapshot public", final_state)
         final_live = workflow.index("bootstrap-routes.readback.json", publication)
-        relinquish = workflow.index(
-            'echo "candidate_owned=false" >> "$GITHUB_OUTPUT"', publication
-        )
 
         self.assertLess(publication, final_live)
-        self.assertLess(final_live, relinquish)
-        self.assertLess(relinquish, publish_boundary)
+        self.assertLess(final_live, prepublication)
+        self.assertLess(prepublication, publish_boundary)
         self.assertLess(publish_boundary, final_state)
         self.assertLess(final_state, readback)
-        self.assertIn('.draft == ($state == "draft")', workflow)
-        self.assertIn('.immutable == ($state == "public")', workflow)
-        self.assertIn("[.assets[] | {name,digest,size,state}]", workflow)
-        self.assertIn("--retry-all-errors", workflow)
-        self.assertIn('sha256sum "$downloaded"', workflow)
-        self.assertIn('wc -c < "$downloaded"', workflow)
+        self.assertIn('.draft == ($state == "draft")', contract)
+        self.assertIn('.immutable == ($state == "public")', contract)
+        self.assertIn("[.assets[] | {name,digest,size,state}]", contract)
+        self.assertIn("releases/assets/$asset_id", contract)
+        self.assertIn("--retry-all-errors", contract)
+        self.assertIn('sha256sum "$downloaded"', contract)
+        self.assertIn('wc -c < "$downloaded"', contract)
         self.assertIn("evaluation release is not an exact retry-safe release", workflow)
         post_publish = workflow[publish_boundary:]
         self.assertNotIn('gh release upload "$EVALUATION_RELEASE"', post_publish)
@@ -540,54 +541,272 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
         workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(
             encoding="utf-8"
         )
-        prepare_start = workflow.index(
-            "- name: Authenticate, sign, verify, and stage the evidence"
-        )
-        publish_start = workflow.index("- name: Publish the exact immutable evidence")
-        postcheck_start = workflow.index(
-            "- name: Recheck immutable-release setting after publication"
-        )
+        ownership_start = workflow.index("  acquire_candidate_ownership:\n")
+        prepare_start = workflow.index("  prepare:\n")
+        publish_start = workflow.index("  publish:\n", prepare_start)
+        postcheck_start = workflow.index("  verify:\n", publish_start)
+        cleanup_start = workflow.index("  restore_candidate_if_unpublished:\n")
+        ownership = workflow[ownership_start:prepare_start]
         prepare = workflow[prepare_start:publish_start]
         publish = workflow[publish_start:postcheck_start]
+        cleanup = workflow[cleanup_start:]
 
+        self.assertIn("candidate_owned: ${{ steps.acquire.outputs.candidate_owned }}", ownership)
+        self.assertNotIn("revision activate", ownership)
+        self.assertNotIn("revision deactivate", ownership)
+        self.assertIn(
+            '"repos/$EVALUATION_REPOSITORY/releases/$evaluation_release_id"',
+            ownership,
+        )
+        self.assertIn(
+            '"repos/$EVALUATION_REPOSITORY/releases/assets/$report_asset_id"',
+            ownership,
+        )
+        self.assertIn(
+            ".identity.target.revision_name == $candidate", ownership
+        )
+        self.assertIn(
+            'bound_release="assistant-eval-${report_code_commit:0:12}-'
+            '${actual_report_sha:0:12}"',
+            ownership,
+        )
+        self.assertIn("needs: acquire_candidate_ownership", prepare)
+        self.assertNotIn("candidate_owned: ${{ steps.stage.outputs.candidate_owned }}", prepare)
         self.assertIn('if [ "$status" -ne 0 ]; then', prepare)
         self.assertIn("cleanup_candidate || status=1", prepare)
         self.assertIn("trap finish EXIT TERM INT", prepare)
 
-        self.assertIn(". lex/scripts/deploy/az-retry.sh", publish)
-        self.assertIn(". lex/scripts/deploy/az-reauth.sh", publish)
         self.assertIn("cleanup_candidate()", publish)
-        self.assertIn('if [ "$status" -ne 0 ]; then', publish)
         self.assertIn("cleanup_candidate || status=1", publish)
         self.assertIn("trap finish EXIT TERM INT", publish)
-        marker = "bootstrap-publication-cleanup-relinquished"
-        marker_guard = publish.index(f'[ ! -f "$RUNNER_TEMP/{marker}" ]')
-        self.assertIn("|| return 0", publish[marker_guard : publish.index("az_reauth")])
-        marker_write = publish.index(f': > "$RUNNER_TEMP/{marker}"')
-        relinquish = publish.index(
-            'echo "candidate_owned=false" >> "$GITHUB_OUTPUT"'
-        )
-        boundary = publish.index('gh release edit "$EVALUATION_RELEASE"')
-        self.assertLess(marker_write, relinquish)
+        payload = publish.index("release-publish-payload.json")
+        live_state = publish.index("publication-state.json", payload)
+        relinquish = publish.index("candidate_owned=false", payload)
+        boundary = publish.index("gh api --method PATCH", relinquish)
+        self.assertLess(payload, relinquish)
+        self.assertLess(payload, live_state)
+        self.assertLess(live_state, relinquish)
         self.assertLess(relinquish, boundary)
-
         self.assertIn(
-            "steps.prepare.outputs.candidate_owned == 'true'",
-            workflow,
+            "EXPECTED_BOOTSTRAP_ROUTES_SHA256: "
+            "${{ needs.prepare.outputs.bootstrap_routes_sha256 }}",
+            publish,
         )
         self.assertIn(
-            "steps.publish.outputs.candidate_owned != 'false'",
-            workflow,
-        )
-        cleanup_start = workflow.index("- name: Always restore one active quota authority")
-        summary_start = workflow.index("- name: Publication summary", cleanup_start)
-        cleanup = workflow[cleanup_start:summary_start]
-        self.assertLess(
-            cleanup.index(f'[ -f "$RUNNER_TEMP/{marker}" ]'),
-            cleanup.index(". lex/scripts/deploy/az-retry.sh"),
+            "bootstrap_routes_sha256: ${{ steps.stage.outputs.bootstrap_routes_sha256 }}",
+            prepare,
         )
 
-    def test_immutable_setting_credential_executes_exactly_three_bounded_gets(self):
+        cleanup_header = cleanup[: cleanup.index("    permissions:")]
+        self.assertIn(
+            "needs.acquire_candidate_ownership.outputs.candidate_owned == 'true'",
+            cleanup_header,
+        )
+        self.assertIn("needs.publish.result != 'success'", cleanup_header)
+        self.assertNotIn("publication_attempted", cleanup_header)
+        self.assertIn("always()", cleanup)
+        self.assertIn("Restore one active quota authority", cleanup)
+        self.assertNotIn("actions/checkout", cleanup)
+        disambiguation = cleanup.index('if [ "$BOOTSTRAP_MODE" = true ]; then')
+        deactivation = cleanup.index("for attempt in {1..6}")
+        self.assertLess(disambiguation, deactivation)
+        self.assertIn("PUBLISH_RESULT: ${{ needs.publish.result }}", cleanup)
+        self.assertIn(
+            "PUBLICATION_ATTEMPTED: "
+            "${{ needs.publish.outputs.publication_attempted }}",
+            cleanup,
+        )
+        self.assertIn(
+            '"repos/$EVALUATION_REPOSITORY/releases/$EVALUATION_RELEASE_ID"',
+            cleanup,
+        )
+        self.assertIn("retain bootstrap C for explicit recovery", cleanup)
+
+    def test_standard_candidate_recovery_survives_attempted_publish_failure_or_cancel(self):
+        workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(
+            encoding="utf-8"
+        )
+        cleanup_start = workflow.index("  restore_candidate_if_unpublished:\n")
+        cleanup = workflow[cleanup_start:]
+        cleanup_header = cleanup[: cleanup.index("    permissions:")]
+        cleanup_script = cleanup[cleanup.index("        run: |") :]
+
+        self.assertIn("needs.publish.result != 'success'", cleanup_header)
+        self.assertNotIn("needs.publish.outputs.publication_attempted", cleanup_header)
+        bootstrap_guard = cleanup_script.index('if [ "$BOOTSTRAP_MODE" = true ]; then')
+        attempted_guard = cleanup_script.index('PUBLICATION_ATTEMPTED')
+        deactivation = cleanup_script.index("for attempt in {1..6}")
+        self.assertLess(bootstrap_guard, attempted_guard)
+        self.assertLess(attempted_guard, deactivation)
+        self.assertIn(
+            "BOOTSTRAP_MODE: ${{ needs.acquire_candidate_ownership.outputs.bootstrap_mode }}",
+            cleanup,
+        )
+
+    def test_candidate_ownership_and_cleanup_never_claim_live_traffic(self):
+        workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(
+            encoding="utf-8"
+        )
+        contract = (
+            ROOT / "scripts" / "assistant_evaluation_release_contract.sh"
+        ).read_text(encoding="utf-8")
+        ownership_start = workflow.index("  acquire_candidate_ownership:\n")
+        prepare_start = workflow.index("  prepare:\n")
+        cleanup_start = workflow.index("  restore_candidate_if_unpublished:\n")
+        ownership = workflow[ownership_start:prepare_start]
+        cleanup = workflow[cleanup_start:]
+
+        self.assertIn("Azure login for read-only candidate acquisition", ownership)
+        self.assertIn('(.properties.trafficWeight // 0) == 0', ownership)
+        self.assertIn('[ "$candidate_active" = false ]', ownership)
+        self.assertIn('[ "$candidate_active" = true ]', ownership)
+        self.assertIn("validate_bootstrap_abandonment_prestate", ownership)
+        cleanup_state = cleanup.index("candidate-cleanup-state.json")
+        bootstrap_prestate = cleanup.index("bootstrap-cleanup-routes.json")
+        inactive_limit = cleanup.index("maxInactiveRevisions == 1", bootstrap_prestate)
+        exact_routes = cleanup.index("length == 3", inactive_limit)
+        traffic_guard = cleanup.index('(.properties.trafficWeight // 0) == 0', cleanup_state)
+        deactivation = cleanup.index("revision deactivate", traffic_guard)
+        self.assertLess(bootstrap_prestate, inactive_limit)
+        self.assertLess(inactive_limit, exact_routes)
+        self.assertLess(exact_routes, deactivation)
+        self.assertLess(cleanup_state, traffic_guard)
+        self.assertLess(traffic_guard, deactivation)
+        self.assertIn("deactivate_zero_traffic_candidate()", contract)
+        self.assertIn("validate_bootstrap_abandonment_prestate()", contract)
+        self.assertIn("maxInactiveRevisions == 1", contract)
+        self.assertIn("length == 3", contract)
+        self.assertIn('(.properties.trafficWeight // 0) == 0', contract)
+        self.assertEqual(
+            2,
+            workflow.count(
+                'deactivate_zero_traffic_candidate "$RESOURCE_GROUP" '
+                '"$CONTAINER_APP" "$CANDIDATE_REVISION"'
+            ),
+        )
+
+    def test_immutable_setting_secret_runs_only_on_fresh_isolated_jobs(self):
+        workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(
+            encoding="utf-8"
+        )
+        job_pattern = re.compile(
+            r"^  (?P<id>[a-z][a-z0-9_]*):\r?\n(?P<body>.*?)"
+            r"(?=^  [a-z][a-z0-9_]*:\r?\n|\Z)",
+            re.MULTILINE | re.DOTALL,
+        )
+        jobs = {
+            match.group("id"): match.group("body")
+            for match in job_pattern.finditer(workflow)
+        }
+        secret_binding = (
+            "LEX_OPS_TOKEN: ${{ secrets.LEX_OPS_TOKEN }}"
+        )
+        secret_jobs = {
+            job_id: body for job_id, body in jobs.items() if secret_binding in body
+        }
+        self.assertEqual(
+            {"immutable_prepublication"},
+            set(secret_jobs),
+        )
+        for job_id, body in secret_jobs.items():
+            with self.subTest(job=job_id):
+                self.assertIn("runs-on: ubuntu-latest", body)
+                self.assertIn("permissions: {}", body)
+                self.assertIn("environment: production", body)
+                self.assertEqual(
+                    1,
+                    len(re.findall(r"(?m)^      - (?:name:|uses:)", body)),
+                )
+                self.assertEqual(1, body.count(secret_binding))
+                self.assertNotIn("actions/checkout", body)
+                self.assertNotIn("      - uses:", body)
+                self.assertNotIn("GITHUB_ENV", body)
+                self.assertNotIn("GITHUB_PATH", body)
+                self.assertIn("BASH_ENV: /dev/null", body)
+                self.assertIn("PATH: /usr/bin:/bin", body)
+                self.assertIn(
+                    "shell: /usr/bin/bash --noprofile --norc -euo pipefail {0}",
+                    body,
+                )
+                self.assertEqual(1, body.count("/usr/bin/gh api --method GET"))
+                self.assertEqual(1, body.count("/usr/bin/jq -e"))
+                for forbidden in (
+                    "gh release",
+                    "gh api --method POST",
+                    "gh api --method PATCH",
+                    "gh api --method DELETE",
+                    "dotnet",
+                    "npm ",
+                    "source ",
+                    ". scripts/",
+                    ". lex/",
+                ):
+                    self.assertNotIn(forbidden, body)
+                self.assertNotRegex(body, r"(?m)^\s*(?:for|while|until)\b")
+
+        self.assertIn("needs: acquire_candidate_ownership", jobs["prepare"])
+        self.assertIn("needs: prepare", jobs["immutable_prepublication"])
+        self.assertIn(
+            "needs: [prepare, immutable_prepublication]",
+            jobs["publish"],
+        )
+        self.assertIn(
+            "needs: [prepare, publish]",
+            jobs["verify"],
+        )
+        self.assertIn("always()", jobs["verify"])
+        self.assertIn("needs.prepare.result == 'success'", jobs["verify"])
+        self.assertIn(
+            "needs.publish.outputs.publication_attempted != 'false'",
+            jobs["verify"],
+        )
+
+    def test_evaluation_publishes_only_the_pinned_release_id_at_the_boundary(self):
+        workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn('gh release edit "$EVALUATION_RELEASE"', workflow)
+        publish_start = workflow.index("  publish:\n")
+        postcheck_start = workflow.index("  verify:\n", publish_start)
+        publish = workflow[publish_start:postcheck_start]
+        self.assertIn(
+            "EVALUATION_RELEASE_ID: ${{ needs.prepare.outputs.evaluation_release_id }}",
+            publish,
+        )
+        payload = publish.index("release-publish-payload.json")
+        exact_patch = publish.index(
+            'gh api --method PATCH',
+            payload,
+        )
+        live_state = publish.index("publication-state.json", payload)
+        final_draft_recheck = publish.index(
+            "draft release changed immediately before publication", live_state
+        )
+        self.assertIn(
+            '"repos/$EVALUATION_REPOSITORY/releases/$EVALUATION_RELEASE_ID"',
+            publish[exact_patch:],
+        )
+        relinquish = publish.index("candidate_owned=false", payload)
+        self.assertLess(payload, relinquish)
+        self.assertLess(live_state, final_draft_recheck)
+        self.assertLess(final_draft_recheck, relinquish)
+        self.assertLess(relinquish, exact_patch)
+        self.assertIn(
+            'echo "publication_attempted=true" >> "$GITHUB_OUTPUT"; \\\n'
+            "            gh api --method PATCH",
+            publish,
+        )
+        gap = publish[relinquish:exact_patch]
+        for forbidden in (
+            "release_notes=",
+            "jq ",
+            "fetch_release_snapshot",
+            "validate_release_snapshot",
+            "validate_release_tag",
+        ):
+            self.assertNotIn(forbidden, gap)
+
+    def test_immutable_setting_credential_executes_one_bounded_get(self):
         candidate = (
             Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
             / "Git"
@@ -601,26 +820,26 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
         workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(
             encoding="utf-8"
         )
-        step_pattern = re.compile(
-            r"^      - name: (?P<name>[^\r\n]+)\r?\n(?P<body>.*?)"
-            r"(?=^      - (?:name:|uses:)|\Z)",
+        job_pattern = re.compile(
+            r"^  (?P<id>[a-z][a-z0-9_]*):\r?\n(?P<body>.*?)"
+            r"(?=^  [a-z][a-z0-9_]*:\r?\n|\Z)",
             re.MULTILINE | re.DOTALL,
         )
-        steps = {
-            match.group("name"): match.group("body")
-            for match in step_pattern.finditer(workflow)
+        jobs = {
+            match.group("id"): match.group("body")
+            for match in job_pattern.finditer(workflow)
         }
-        names = (
-            "Read immutable-release setting at entry",
-            "Recheck immutable-release setting before publication",
-            "Recheck immutable-release setting after publication",
-        )
+        names = ("immutable_prepublication",)
         scripts = []
         for name in names:
-            body = steps[name]
+            body = jobs[name]
             marker = "        run: |\n"
             self.assertIn(marker, body)
-            scripts.append(textwrap.dedent(body.split(marker, 1)[1]))
+            script = textwrap.dedent(body.split(marker, 1)[1])
+            scripts.append(
+                "set -euo pipefail\n"
+                + script.replace("/usr/bin/gh", "gh").replace("/usr/bin/jq", "jq")
+            )
 
         mock = r'''gh() {
   printf '%s\t%s\n' "${GH_TOKEN:-}" "$*" >> "$GH_AUDIT"
@@ -639,7 +858,7 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
                     {"enabled": True, "enforced_by_owner": False}
                 ),
                 "GH_TOKEN": "workflow-token",
-                "IMMUTABLE_RELEASES_READ_TOKEN": "bounded-admin-read",
+                "LEX_OPS_TOKEN": "bounded-existing-token",
                 "RUNNER_TEMP": directory.as_posix(),
             }
             for name, script in zip(names, scripts):
@@ -655,12 +874,13 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
                     self.assertEqual(0, completed.returncode, completed.stderr)
 
             calls = audit.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(3, len(calls), calls)
+            self.assertEqual(1, len(calls), calls)
             for call in calls:
                 token, arguments = call.split("\t", 1)
-                self.assertEqual("bounded-admin-read", token)
+                self.assertEqual("bounded-existing-token", token)
                 self.assertEqual(
-                    "api --method GET -H X-GitHub-Api-Version: 2026-03-10 "
+                    "api --method GET -H Accept: application/vnd.github+json "
+                    "-H X-GitHub-Api-Version: 2026-03-10 "
                     "repos/SFHAJJI/lex-ops/immutable-releases",
                     arguments,
                 )
@@ -668,13 +888,13 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
             missing = subprocess.run(
                 [bash, "-c", mock + scripts[0]],
                 cwd=ROOT,
-                env={**environment, "IMMUTABLE_RELEASES_READ_TOKEN": ""},
+                env={**environment, "LEX_OPS_TOKEN": ""},
                 text=True,
                 capture_output=True,
                 check=False,
             )
             self.assertNotEqual(0, missing.returncode)
-            self.assertEqual(3, len(audit.read_text(encoding="utf-8").splitlines()))
+            self.assertEqual(1, len(audit.read_text(encoding="utf-8").splitlines()))
 
             disabled = subprocess.run(
                 [bash, "-c", mock + scripts[0]],
@@ -698,11 +918,13 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
         retry = workflow[retry_start:retry_end]
 
         self.assertIn("assistant-eval verify-release", retry)
-        self.assertIn("candidate_owned=$candidate_owned", retry)
+        self.assertIn(
+            "candidate_owned: ${{ steps.acquire.outputs.candidate_owned }}", workflow
+        )
         self.assertNotIn("gh release", retry)
         self.assertNotIn("gh api", retry)
         self.assertNotIn("curl", retry)
-        self.assertIn('echo "PUBLIC_RETRY=true" >> "$GITHUB_ENV"', workflow)
+        self.assertIn('echo "PUBLIC_RETRY=$public_retry" >> "$GITHUB_ENV"', workflow)
 
     def test_evaluation_publication_describes_project_owner_review_honestly(self):
         workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(encoding="utf-8")
@@ -715,10 +937,7 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
         self.assertIn("Promotion independently revalidates this package", workflow)
 
     def test_evaluation_release_json_contract_fails_closed(self):
-        workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(encoding="utf-8")
-        start = workflow.index("# BEGIN EVALUATION_RELEASE_CONTRACT")
-        end = workflow.index("# END EVALUATION_RELEASE_CONTRACT", start)
-        contract = textwrap.dedent(workflow[workflow.index("\n", start) + 1 : end])
+        contract = RELEASE_CONTRACT.read_text(encoding="utf-8")
         candidate = (
             Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
             / "Git"
@@ -742,6 +961,7 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
             names_path = directory / "names.json"
             names_path.write_text(json.dumps([name]), encoding="utf-8")
             asset = {
+                "id": 42,
                 "name": name,
                 "digest": "sha256:" + hashlib.sha256(asset_path.read_bytes()).hexdigest(),
                 "size": asset_path.stat().st_size,
@@ -769,21 +989,18 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
             def run_release(
                 release_value=release,
                 tag_value=tag_ref,
-                setting_value={"enabled": True},
                 state="public",
             ):
                 release_path = directory / "release.json"
                 tag_path = directory / "tag.json"
-                setting_path = directory / "setting.json"
                 release_path.write_text(json.dumps(release_value), encoding="utf-8")
                 tag_path.write_text(json.dumps(tag_value), encoding="utf-8")
-                setting_path.write_text(json.dumps(setting_value), encoding="utf-8")
                 return subprocess.run(
                     [
                         bash,
                         "-c",
                         'set -euo pipefail; . "$1"; '
-                        'validate_release_snapshot "$2" "$3" "$4" "$5" "$7" false; '
+                        'validate_release_snapshot "$2" "$3" "$4" "$5" false; '
                         'validate_release_tag "$6"',
                         "_",
                         contract_path.as_posix(),
@@ -792,7 +1009,6 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
                         names_path.as_posix(),
                         release_path.as_posix(),
                         tag_path.as_posix(),
-                        setting_path.as_posix(),
                     ],
                     cwd=ROOT,
                     env=environment,
@@ -803,7 +1019,6 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
 
             valid_public = run_release()
             self.assertEqual(0, valid_public.returncode, valid_public.stderr)
-            self.assertNotEqual(0, run_release(setting_value={"enabled": False}).returncode)
 
             draft = json.loads(json.dumps(release))
             draft.update(draft=True, immutable=False)
@@ -959,21 +1174,253 @@ fetch_release_snapshot "$2"
                     self.assertNotEqual(0, invalid_fetch.returncode)
                     self.assertEqual("", invalid_log)
 
+            download_root = directory / "downloaded"
+            download_log = directory / "download.log"
+            downloaded = subprocess.run(
+                [
+                    bash,
+                    "-c",
+                    r'''set -euo pipefail
+. "$1"
+gh() {
+  printf '%s\n' "$*" >> "$GH_LOG"
+  printf '%s' 'exact release bytes'
+}
+download_release_assets_by_id "$2" "$3"
+''',
+                    "_",
+                    contract_path.as_posix(),
+                    download_root.as_posix(),
+                    (directory / "release.json").as_posix(),
+                ],
+                cwd=ROOT,
+                env={**environment, "GH_LOG": str(download_log)},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, downloaded.returncode, downloaded.stderr)
+            self.assertEqual(asset_path.read_bytes(), (download_root / name).read_bytes())
+            download_calls = download_log.read_text(encoding="utf-8")
+            self.assertIn("repos/SFHAJJI/lex-ops/releases/assets/42", download_calls)
+            self.assertNotIn("/releases/tags/", download_calls)
+
+            routes_one = directory / "routes-one.json"
+            routes_two = directory / "routes-two.json"
+            routes_changed = directory / "routes-changed.json"
+            canonical_one = directory / "routes-one.canonical.json"
+            canonical_two = directory / "routes-two.canonical.json"
+            canonical_changed = directory / "routes-changed.canonical.json"
+            route = {
+                "id": "/apps/lex/revisions/candidate",
+                "name": "ca-lex-web--candidate",
+                "properties": {
+                    "active": True,
+                    "trafficWeight": 0,
+                    "replicas": 1,
+                    "runningState": "Running",
+                    "healthState": "Healthy",
+                    "lastActiveTime": "2026-08-15T10:00:00Z",
+                },
+            }
+            routes_one.write_text(json.dumps([route]), encoding="utf-8")
+            drifted = json.loads(json.dumps(route))
+            drifted["properties"].update(
+                replicas=3,
+                runningState="Processing",
+                healthState="Unknown",
+                lastActiveTime="2026-08-15T10:05:00Z",
+            )
+            routes_two.write_text(json.dumps([drifted]), encoding="utf-8")
+            changed = json.loads(json.dumps(drifted))
+            changed["properties"]["trafficWeight"] = 100
+            routes_changed.write_text(json.dumps([changed]), encoding="utf-8")
+
+            def canonicalize(source, output):
+                return subprocess.run(
+                    [
+                        bash,
+                        "-c",
+                        'set -euo pipefail; . "$1"; '
+                        'canonicalize_revision_routes "$2" "$3"',
+                        "_",
+                        contract_path.as_posix(),
+                        source.as_posix(),
+                        output.as_posix(),
+                    ],
+                    cwd=ROOT,
+                    env=environment,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+            self.assertEqual(0, canonicalize(routes_one, canonical_one).returncode)
+            self.assertEqual(0, canonicalize(routes_two, canonical_two).returncode)
+            self.assertEqual(canonical_one.read_bytes(), canonical_two.read_bytes())
+            self.assertEqual(
+                0, canonicalize(routes_changed, canonical_changed).returncode
+            )
+            self.assertNotEqual(
+                canonical_one.read_bytes(), canonical_changed.read_bytes()
+            )
+
+            def run_candidate_cleanup(active, traffic):
+                state_path = directory / "candidate-state.json"
+                marker_path = directory / "candidate-deactivated"
+                log_path = directory / "candidate-cleanup.log"
+                marker_path.unlink(missing_ok=True)
+                log_path.write_text("", encoding="utf-8")
+                state_path.write_text(
+                    json.dumps(
+                        {
+                            "name": "ca-lex-web--candidate",
+                            "properties": {
+                                "active": active,
+                                "trafficWeight": traffic,
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                result = subprocess.run(
+                    [
+                        bash,
+                        "-c",
+                        r'''set -euo pipefail
+. "$1"
+az() {
+  printf '%s\n' "$*" >> "$AZ_LOG"
+  case "$1 $2 $3" in
+    "containerapp revision show")
+      if [ -f "$AZ_DEACTIVATED" ]; then
+        jq '.properties.active = false' "$AZ_STATE"
+      else
+        cat "$AZ_STATE"
+      fi
+      ;;
+    "containerapp revision deactivate") touch "$AZ_DEACTIVATED" ;;
+    *) return 97 ;;
+  esac
+}
+sleep() { :; }
+deactivate_zero_traffic_candidate rg-platform ca-lex-web ca-lex-web--candidate
+''',
+                        "_",
+                        contract_path.as_posix(),
+                    ],
+                    cwd=ROOT,
+                    env={
+                        **environment,
+                        "RUNNER_TEMP": directory.as_posix(),
+                        "AZ_STATE": state_path.as_posix(),
+                        "AZ_DEACTIVATED": marker_path.as_posix(),
+                        "AZ_LOG": log_path.as_posix(),
+                    },
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                return result, log_path.read_text(encoding="utf-8")
+
+            safe_cleanup, safe_log = run_candidate_cleanup(True, 0)
+            self.assertEqual(0, safe_cleanup.returncode, safe_cleanup.stderr)
+            self.assertIn("containerapp revision deactivate", safe_log)
+            inactive_cleanup, inactive_log = run_candidate_cleanup(False, 0)
+            self.assertEqual(0, inactive_cleanup.returncode, inactive_cleanup.stderr)
+            self.assertNotIn("containerapp revision deactivate", inactive_log)
+            live_cleanup, live_log = run_candidate_cleanup(True, 100)
+            self.assertNotEqual(0, live_cleanup.returncode)
+            self.assertNotIn("containerapp revision deactivate", live_log)
+
+            def run_bootstrap_prestate(routes, inactive_limit=1):
+                app_path = directory / "bootstrap-app.json"
+                routes_path = directory / "bootstrap-routes.json"
+                app_path.write_text(
+                    json.dumps(
+                        {
+                            "properties": {
+                                "configuration": {
+                                    "maxInactiveRevisions": inactive_limit
+                                }
+                            }
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                routes_path.write_text(json.dumps(routes), encoding="utf-8")
+                return subprocess.run(
+                    [
+                        bash,
+                        "-c",
+                        r'''set -euo pipefail
+. "$1"
+az() {
+  case "$1 $2 $3" in
+    "containerapp show -g") cat "$AZ_APP" ;;
+    "containerapp revision list") cat "$AZ_ROUTES" ;;
+    *) return 97 ;;
+  esac
+}
+validate_bootstrap_abandonment_prestate \
+  rg-platform ca-lex-web ca-lex-web--candidate ca-lex-web--rollback
+''',
+                        "_",
+                        contract_path.as_posix(),
+                    ],
+                    cwd=ROOT,
+                    env={
+                        **environment,
+                        "RUNNER_TEMP": directory.as_posix(),
+                        "AZ_APP": app_path.as_posix(),
+                        "AZ_ROUTES": routes_path.as_posix(),
+                    },
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+            bootstrap_routes = [
+                {
+                    "name": "ca-lex-web--authority",
+                    "properties": {"active": True, "trafficWeight": 100},
+                },
+                {
+                    "name": "ca-lex-web--rollback",
+                    "properties": {"active": False, "trafficWeight": 0},
+                },
+                {
+                    "name": "ca-lex-web--candidate",
+                    "properties": {"active": True, "trafficWeight": 0},
+                },
+            ]
+            self.assertEqual(
+                0, run_bootstrap_prestate(bootstrap_routes).returncode
+            )
+            self.assertNotEqual(
+                0, run_bootstrap_prestate(bootstrap_routes, inactive_limit=2).returncode
+            )
+            extra_routes = [*bootstrap_routes, bootstrap_routes[1]]
+            self.assertNotEqual(0, run_bootstrap_prestate(extra_routes).returncode)
+            live_candidate = json.loads(json.dumps(bootstrap_routes))
+            live_candidate[2]["properties"]["trafficWeight"] = 10
+            self.assertNotEqual(0, run_bootstrap_prestate(live_candidate).returncode)
+
     def test_evaluation_release_is_attested_before_azure_and_frozen_exactly(self):
         workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(encoding="utf-8")
+        contract = RELEASE_CONTRACT.read_text(encoding="utf-8")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertIn("attestations: read", workflow)
         self.assertIn("WORKFLOW_COMMIT: ${{ github.sha }}", workflow)
         self.assertIn("X-GitHub-Api-Version: 2026-03-10", workflow)
-        self.assertIn('repos/$EVALUATION_REPOSITORY/immutable-releases', workflow)
-        self.assertIn('gh release verify "$EVALUATION_RELEASE" --repo "$EVALUATION_REPOSITORY"', workflow)
-        self.assertIn('gh release verify-asset "$EVALUATION_RELEASE"', workflow)
+        self.assertIn('gh release verify "$EVALUATION_RELEASE" --repo "$EVALUATION_REPOSITORY"', contract)
+        self.assertIn('gh release verify-asset "$EVALUATION_RELEASE"', contract)
         self.assertIn('repos/$EVALUATION_REPOSITORY/git/ref/tags/$EVALUATION_RELEASE', workflow)
         self.assertIn('[[ "$WORKFLOW_COMMIT" =~ ^[0-9a-f]{40}$ ]]', workflow)
         self.assertIn(
             'gh release view "$EVALUATION_RELEASE" --repo "$EVALUATION_REPOSITORY"',
-            workflow,
+            workflow + contract,
         )
         self.assertIn("--json databaseId,tagName", workflow)
         self.assertNotIn(
@@ -981,10 +1428,7 @@ fetch_release_snapshot "$2"
             workflow,
         )
 
-        secret_binding = (
-            "IMMUTABLE_RELEASES_READ_TOKEN: "
-            "${{ secrets.IMMUTABLE_RELEASES_READ_TOKEN }}"
-        )
+        secret_binding = "LEX_OPS_TOKEN: ${{ secrets.LEX_OPS_TOKEN }}"
         step_pattern = re.compile(
             r"^      - name: (?P<name>[^\r\n]+)\r?\n(?P<body>.*?)"
             r"(?=^      - (?:name:|uses:)|\Z)",
@@ -996,74 +1440,26 @@ fetch_release_snapshot "$2"
             if secret_binding in match.group("body")
         ]
         self.assertEqual(
-            [
-                "Read immutable-release setting at entry",
-                "Recheck immutable-release setting before publication",
-                "Recheck immutable-release setting after publication",
-            ],
+            ["Recheck immutable-release setting before publication"],
             [name for name, _ in secret_steps],
         )
-        self.assertEqual(3, workflow.count(secret_binding))
-        self.assertNotIn("secrets.LEX_OPS_TOKEN", workflow)
+        self.assertEqual(1, workflow.count(secret_binding))
+        self.assertNotIn("IMMUTABLE_RELEASES_READ_TOKEN", workflow + readme)
         self.assertEqual(
-            3,
+            1,
             workflow.count(
-                'GH_TOKEN="$IMMUTABLE_RELEASES_READ_TOKEN" gh api --method GET'
+                'GH_TOKEN="$LEX_OPS_TOKEN" /usr/bin/gh api --method GET'
             ),
         )
         self.assertEqual(
-            3,
-            workflow.count('repos/$EVALUATION_REPOSITORY/immutable-releases'),
+            1,
+            workflow.count("repos/SFHAJJI/lex-ops/immutable-releases"),
         )
         self.assertNotIn("read_immutable_release_setting", workflow)
-        expected_details = {
-            "Read immutable-release setting at entry": (
-                "immutable-release-setting-entry.json",
-                "Immutable Releases is not enabled exactly",
-            ),
-            "Recheck immutable-release setting before publication": (
-                "immutable-release-setting-prepublish.json",
-                "Immutable Releases is not enabled immediately before publication",
-            ),
-            "Recheck immutable-release setting after publication": (
-                "immutable-release-setting-published.json",
-                "Immutable Releases is not enabled immediately after publication",
-            ),
-        }
-        for name, body in secret_steps:
-            with self.subTest(step=name):
-                if name == "Read immutable-release setting at entry":
-                    self.assertNotIn("if: env.PUBLIC_RETRY", body)
-                else:
-                    self.assertIn("if: env.PUBLIC_RETRY != 'true'", body)
-                marker = "        run: |\n"
-                self.assertIn(marker, body)
-                lines = [
-                    line.strip()
-                    for line in textwrap.dedent(body.split(marker, 1)[1]).splitlines()
-                    if line.strip()
-                ]
-                output, error = expected_details[name]
-                self.assertEqual(
-                    [
-                        "set -euo pipefail",
-                        '[[ -n "${IMMUTABLE_RELEASES_READ_TOKEN:-}" ]] \\',
-                        '|| { echo "::error::immutable-release setting read credential is unavailable"; exit 1; }',
-                        f'output="$RUNNER_TEMP/{output}"',
-                        'GH_TOKEN="$IMMUTABLE_RELEASES_READ_TOKEN" gh api --method GET \\',
-                        "-H 'X-GitHub-Api-Version: 2026-03-10' \\",
-                        '"repos/$EVALUATION_REPOSITORY/immutable-releases" > "$output"',
-                        "jq -e '",
-                        'type == "object"',
-                        "and .enabled == true",
-                        'and ((.enforced_by_owner | type) == "boolean")',
-                        "' \"$output\" >/dev/null \\",
-                        f'|| {{ echo "::error::{error}"; exit 1; }}',
-                    ],
-                    lines,
-                )
-        self.assertIn("`IMMUTABLE_RELEASES_READ_TOKEN`", readme)
-        self.assertIn("at most three bounded Immutable Releases setting reads", readme)
+        self.assertIn("`LEX_OPS_TOKEN`", readme)
+        self.assertIn("one hard-coded prepublication Immutable Releases setting read", readme)
+        self.assertIn("sole step on a fresh,", readme)
+        self.assertIn("patches the pinned numeric release ID", readme)
 
         identity = workflow.index("scripts/assistant_evaluation_identity.py")
         tag_creation = workflow.index('ensure_release_tag "$release_state"', identity)
@@ -1078,20 +1474,18 @@ fetch_release_snapshot "$2"
         self.assertLess(public_retry_verify, azure)
 
         upload = workflow.index('gh release upload "$EVALUATION_RELEASE"')
-        immutable_recheck = workflow.index("immutable-release-setting-prepublish.json", upload)
-        exact_draft_recheck = workflow.index("validate_release_snapshot", immutable_recheck)
-        publish = workflow.index('gh release edit "$EVALUATION_RELEASE"', exact_draft_recheck)
+        immutable_recheck = workflow.index("  immutable_prepublication:\n", upload)
+        exact_draft_recheck = workflow.index(
+            "draft release changed immediately before publication", immutable_recheck
+        )
+        publish = workflow.index("gh api --method PATCH", exact_draft_recheck)
         self.assertLess(upload, immutable_recheck)
         self.assertLess(immutable_recheck, exact_draft_recheck)
         self.assertLess(exact_draft_recheck, publish)
 
-        immutable_postcheck = workflow.index(
-            "immutable-release-setting-published.json", publish
-        )
-        poll = workflow.index("for attempt in {1..12}", immutable_postcheck)
-        final_verify = workflow.index("validate_release_snapshot public evidence", poll)
-        self.assertLess(publish, immutable_postcheck)
-        self.assertLess(immutable_postcheck, poll)
+        poll = workflow.index("for attempt in {1..12}", publish)
+        final_verify = workflow.index("validate_release_snapshot public", poll)
+        self.assertLess(publish, poll)
         self.assertLess(poll, final_verify)
 
         asset_start = workflow.index("          release_assets=(")
