@@ -30,7 +30,9 @@ class WorkflowContractTests(unittest.TestCase):
             "EXPECTED_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}",
             "staging/eu-eurlex/cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c",
             'DB_OLD_ETAG: "0x8DEFAB361991E14"',
+            'DB_CONTENT_MD5_BASE64: ""',
             'VECTORS_OLD_ETAG: "0x8DEFAB361980DD4"',
+            'VECTORS_CONTENT_MD5_BASE64: "ZzhDHADQX2tUFEJ3YPrRNg=="',
             "f827e089bddff64709926af4341bc0ddbfbef829a5c3e29400754aec3b649fd9",
             "fb600d1221ab108f5f55f287682844b9f2fa03308c5401ed7d9488ae2544b6ad",
             "ARTICLES_GENERATION_SHA256: 6a2fb2647dea3ba0b3391e40a0612073c626ef0966bd816cdb8b99b57135c8da",
@@ -55,13 +57,17 @@ class WorkflowContractTests(unittest.TestCase):
             "repair_blob must run directly so Bash errexit is not cleared by command substitution",
         )
         self.assertIn(
-            'application/vnd.sqlite3 db db_etag',
+            '"$DB_CONTENT_MD5_BASE64" application/vnd.sqlite3 db db_etag',
             workflow,
         )
         self.assertIn(
-            '"$VECTORS_SIZE" application/octet-stream vectors vectors_etag',
+            '"$VECTORS_SIZE" "$VECTORS_CONTENT_MD5_BASE64" '
+            'application/octet-stream vectors vectors_etag',
             workflow,
         )
+        self.assertIn('if ($expected_md5 | length) == 0', workflow)
+        self.assertIn('then .properties.contentSettings.contentMd5 == null', workflow)
+        self.assertIn('else .properties.contentSettings.contentMd5 == $expected_md5', workflow)
         self.assertIn('printf -v "$result_name" \'%s\' "$etag"', workflow)
         self.assertEqual(6, workflow.count("az storage blob "))
         self.assertEqual(
