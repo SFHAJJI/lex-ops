@@ -30,10 +30,12 @@ jobs:
       PREFIX: staging/eu-eurlex/cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c
       DB_NAME: index-eu-eurlex.db
       DB_OLD_ETAG: "0x8DEFAB361991E14"
+      DB_CONTENT_MD5_BASE64: ""
       DB_SHA256: f827e089bddff64709926af4341bc0ddbfbef829a5c3e29400754aec3b649fd9
       DB_SIZE: "589156352"
       VECTORS_NAME: index-eu-eurlex.vectors
       VECTORS_OLD_ETAG: "0x8DEFAB361980DD4"
+      VECTORS_CONTENT_MD5_BASE64: "ZzhDHADQX2tUFEJ3YPrRNg=="
       VECTORS_SHA256: fb600d1221ab108f5f55f287682844b9f2fa03308c5401ed7d9488ae2544b6ad
       VECTORS_SIZE: "140342576"
       QUEUE_TICKET_ID: cc6890caa4455bd4efa0c5c72b1c73516e8c0843d988782cf04d5b8dbf38173c
@@ -80,8 +82,9 @@ jobs:
           }
 
           validate_base() {
-            local snapshot="$1" name="$2" size="$3"
-            jq -e --arg name "$name" --argjson size "$size" '
+            local snapshot="$1" name="$2" size="$3" expected_md5="$4"
+            jq -e --arg name "$name" --argjson size "$size" \
+              --arg expected_md5 "$expected_md5" '
               .name == $name
               and .properties.blobType == "BlockBlob"
               and .properties.contentLength == $size
@@ -90,7 +93,10 @@ jobs:
               and (.properties.contentSettings.contentDisposition == null)
               and (.properties.contentSettings.contentEncoding == null)
               and (.properties.contentSettings.contentLanguage == null)
-              and (.properties.contentSettings.contentMd5 == null)
+              and (if ($expected_md5 | length) == 0
+                then .properties.contentSettings.contentMd5 == null
+                else .properties.contentSettings.contentMd5 == $expected_md5
+                end)
             ' "$snapshot" >/dev/null
           }
 
@@ -161,13 +167,13 @@ jobs:
           }
 
           repair_blob() {
-            local name="$1" old_etag="$2" sha="$3" size="$4" expected_type="$5" label="$6"
-            local result_name="$7"
+            local name="$1" old_etag="$2" sha="$3" size="$4" expected_md5="$5"
+            local expected_type="$6" label="$7" result_name="$8"
             local before="$RUNNER_TEMP/$label-before.json"
             local after="$RUNNER_TEMP/$label-after.json"
             local etag kind content_type updated
             capture_blob "$name" "$before"
-            validate_base "$before" "$name" "$size" \
+            validate_base "$before" "$name" "$size" "$expected_md5" \
               || { echo "::error::legacy staging snapshot changed for $name"; return 1; }
             etag=$(normalize_etag "$(jq -er .properties.etag "$before")")
             [[ "$etag" =~ ^0x[0-9A-F]+$ ]] \
@@ -207,7 +213,7 @@ jobs:
             fi
 
             capture_blob "$name" "$after"
-            validate_base "$after" "$name" "$size" \
+            validate_base "$after" "$name" "$size" "$expected_md5" \
               || { echo "::error::post-repair staging snapshot is not canonical for $name"; return 1; }
             [ "$(metadata_kind "$after" "$sha")" = canonical ] \
               || { echo "::error::post-repair staging snapshot is not canonical for $name"; return 1; }
@@ -224,9 +230,9 @@ jobs:
           db_etag=''
           vectors_etag=''
           repair_blob "$db" "$DB_OLD_ETAG" "$DB_SHA256" "$DB_SIZE" \
-            application/vnd.sqlite3 db db_etag
+            "$DB_CONTENT_MD5_BASE64" application/vnd.sqlite3 db db_etag
           repair_blob "$vectors" "$VECTORS_OLD_ETAG" "$VECTORS_SHA256" \
-            "$VECTORS_SIZE" application/octet-stream vectors vectors_etag
+            "$VECTORS_SIZE" "$VECTORS_CONTENT_MD5_BASE64" application/octet-stream vectors vectors_etag
 
           final_inventory=$(az storage blob list --auth-mode login --only-show-errors \
             --account-name "$STORAGE_ACCOUNT" --container-name "$CONTAINER" \
