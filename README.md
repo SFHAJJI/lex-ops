@@ -105,8 +105,8 @@ has only the permissions needed for private staging and manifest signing.
 Assistant release evidence uses the same artifact signer through a separate bounded workflow.
 `publish-assistant-evaluation` accepts only an exact four-file draft release, checks out the
 evaluated Lex commit, temporarily activates the inactive zero-traffic Container Apps revision,
-authenticates it and both Azure model deployments (including SKU), verifies the independent human
-review, and recomputes every report gate. It runs five unmocked Chromium presentation samples
+authenticates it and both Azure model deployments (including SKU), verifies the project-owner review
+signature, and recomputes every report gate. It runs five unmocked Chromium presentation samples
 against that exact revision, adds their candidate-bound evidence as the fifth signed file, and
 returns the candidate to inactive state on success, failure or interruption. It then signs the
 whole evidence set with the pinned Key Vault key version and publishes the release.

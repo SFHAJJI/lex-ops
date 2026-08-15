@@ -710,7 +710,7 @@ jobs:
             echo "- release: \`$EVALUATION_RELEASE\`"
             echo "- candidate revision: \`$CANDIDATE_REVISION\`"
             echo "- code commit: \`$CODE_COMMIT\`"
-            echo "- independent review signature: verified"
+            echo "- project-owner review signature: verified"
             echo "- Azure target and model identities: verified"
             echo "- whole-evidence Key Vault signature: verified"
             if [ "$BOOTSTRAP_MODE" = "true" ]; then
