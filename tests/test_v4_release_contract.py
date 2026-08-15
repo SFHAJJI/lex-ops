@@ -201,6 +201,200 @@ class V4ReleaseContractTests(unittest.TestCase):
         self.assertNotEqual(0, rejected.returncode)
         self.assertIn("generation", rejected.stderr)
 
+    def test_corpus_manifest_exposes_its_ingester_without_relabeling_it(self) -> None:
+        accepted = run_contract(
+            "validate-corpus-manifest",
+            self.publisher,
+            self.manifest.name,
+            self.configuration.name,
+            "-",
+            cwd=self.root,
+        )
+        self.assertEqual(0, accepted.returncode, accepted.stderr)
+        self.assertEqual(self.ingester_commit, accepted.stdout.strip())
+
+        exact = run_contract(
+            "validate-corpus-manifest",
+            self.publisher,
+            self.manifest.name,
+            self.configuration.name,
+            self.ingester_commit,
+            cwd=self.root,
+        )
+        self.assertEqual(0, exact.returncode, exact.stderr)
+
+        rejected = run_contract(
+            "validate-corpus-manifest",
+            self.publisher,
+            self.manifest.name,
+            self.configuration.name,
+            self.lex_commit,
+            cwd=self.root,
+        )
+        self.assertNotEqual(0, rejected.returncode)
+        self.assertIn("another Lex commit", rejected.stderr)
+
+    def test_corpus_resume_is_executable_ancestor_and_scope_policy(self) -> None:
+        repository = self.root / "lex"
+        repository.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.invalid"],
+            cwd=repository,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "test"], cwd=repository, check=True
+        )
+        subprocess.run(
+            ["git", "config", "core.autocrlf", "false"],
+            cwd=repository,
+            check=True,
+        )
+        scope = repository / "src" / "Lex.Sources.EurLex" / "eu-scope.json"
+        scope.parent.mkdir(parents=True)
+        old_scope = b'{"scope":"old"}\n'
+        new_scope = b'{"scope":"new"}\n'
+        scope.write_bytes(old_scope)
+        subprocess.run(["git", "add", "."], cwd=repository, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "old"], cwd=repository, check=True)
+        old_commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=repository, text=True
+        ).strip()
+
+        (repository / "README").write_text("same scope\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repository, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "same"], cwd=repository, check=True)
+        same_scope_commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=repository, text=True
+        ).strip()
+
+        scope.write_bytes(new_scope)
+        subprocess.run(["git", "add", "."], cwd=repository, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "new"], cwd=repository, check=True)
+        changed_scope_commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=repository, text=True
+        ).strip()
+        main_branch = subprocess.check_output(
+            ["git", "branch", "--show-current"], cwd=repository, text=True
+        ).strip()
+
+        subprocess.run(
+            ["git", "checkout", "-q", "--orphan", "divergent"],
+            cwd=repository,
+            check=True,
+        )
+        subprocess.run(["git", "rm", "-q", "-rf", "."], cwd=repository, check=True)
+        scope.parent.mkdir(parents=True, exist_ok=True)
+        scope.write_bytes(old_scope)
+        subprocess.run(["git", "add", "."], cwd=repository, check=True)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "divergent"], cwd=repository, check=True
+        )
+        divergent_commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=repository, text=True
+        ).strip()
+        subprocess.run(
+            ["git", "checkout", "-q", main_branch], cwd=repository, check=True
+        )
+
+        current_old_scope = self.root / "old-scope.json"
+        current_old_scope.write_bytes(old_scope)
+        current_new_scope = self.root / "new-scope.json"
+        current_new_scope.write_bytes(new_scope)
+
+        def write_eu_manifest(ingester: str) -> None:
+            self.manifest.write_text(
+                json.dumps(
+                    {
+                        "schema": "lex-corpus/4",
+                        "publisher": {"id": self.publisher},
+                        "ingester_code_commit": ingester,
+                        "source_configuration_kind": "engineering_scope",
+                        "source_configuration_sha256": digest(old_scope),
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+        write_eu_manifest(old_commit)
+        exact = run_contract(
+            "classify-corpus-resume",
+            self.publisher,
+            self.manifest.name,
+            current_old_scope.name,
+            str(repository),
+            old_commit,
+            cwd=self.root,
+        )
+        self.assertEqual(0, exact.returncode, exact.stderr)
+        self.assertEqual(f"reuse {old_commit}", exact.stdout.strip())
+
+        ancestor = run_contract(
+            "classify-corpus-resume",
+            self.publisher,
+            self.manifest.name,
+            current_old_scope.name,
+            str(repository),
+            same_scope_commit,
+            cwd=self.root,
+        )
+        self.assertEqual(0, ancestor.returncode, ancestor.stderr)
+        self.assertEqual(f"reuse {old_commit}", ancestor.stdout.strip())
+
+        changed = run_contract(
+            "classify-corpus-resume",
+            self.publisher,
+            self.manifest.name,
+            current_new_scope.name,
+            str(repository),
+            changed_scope_commit,
+            cwd=self.root,
+        )
+        self.assertEqual(0, changed.returncode, changed.stderr)
+        self.assertEqual(f"rebuild {old_commit}", changed.stdout.strip())
+
+        write_eu_manifest(divergent_commit)
+        divergent = run_contract(
+            "classify-corpus-resume",
+            self.publisher,
+            self.manifest.name,
+            current_new_scope.name,
+            str(repository),
+            changed_scope_commit,
+            cwd=self.root,
+        )
+        self.assertNotEqual(0, divergent.returncode)
+        self.assertIn("protected Lex ancestor", divergent.stderr)
+
+        self.manifest.write_text(
+            json.dumps(
+                {
+                    "schema": "lex-corpus/4",
+                    "publisher": {"id": "lu-legilux"},
+                    "ingester_code_commit": old_commit,
+                    "source_configuration_kind": "code_only",
+                    "source_configuration_sha256": None,
+                },
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        lu = run_contract(
+            "classify-corpus-resume",
+            "lu-legilux",
+            self.manifest.name,
+            "-",
+            str(repository),
+            changed_scope_commit,
+            cwd=self.root,
+        )
+        self.assertEqual(0, lu.returncode, lu.stderr)
+        self.assertEqual(f"reuse {old_commit}", lu.stdout.strip())
+
     def test_legacy_articles_generation_is_explicitly_reinitialized_for_v3(self) -> None:
         repository = self.root / "articles"
         repository.mkdir()

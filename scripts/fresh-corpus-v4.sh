@@ -43,6 +43,7 @@ require_remote_unchanged() {
 corpus() {
   : "${PUBLISHER:?PUBLISHER is required}"
   local repo directory baseline free_bytes baseline_bytes required_bytes source_configuration
+  local resume_decision resume_action existing_ingester
   local scope_args=()
   repo=$(repo_for "$PUBLISHER")
   source_configuration=$(source_configuration_for "$PUBLISHER")
@@ -50,19 +51,28 @@ corpus() {
   gh repo clone "$repo" "$directory" -- --depth 1 --branch main
   baseline=$(git -C "$directory" rev-parse HEAD)
 
-  # A matrix sibling may have committed while a previous run later failed. Resume without a
-  # second publisher poll, but only when the protected head is the exact v4 materialization this
-  # reviewed Lex commit would have produced.
+  # A matrix sibling may have committed while a previous run later failed. A complete v4 corpus
+  # keeps its own immutable ingester identity; the generation and ticket contracts deliberately
+  # support different protected ingester commits for the two publishers.
   if [ "$(jq -r '.schema // ""' "$directory/manifest.json")" = "lex-corpus/4" ]; then
-    bash "$release_contract" validate-corpus-manifest "$PUBLISHER" \
-      "$directory/manifest.json" "$source_configuration" "$LEX_COMMIT" >/dev/null
-    "${lex_cli[@]}" verify corpus --corpus "$directory"
-    {
-      echo "### Fresh corpus: $PUBLISHER"
-      echo "- already committed and verified: \`$baseline\`"
-      echo "- Lex materializer: \`$LEX_COMMIT\`"
-    } >> "$GITHUB_STEP_SUMMARY"
-    return 0
+    resume_decision=$(bash "$release_contract" classify-corpus-resume \
+      "$PUBLISHER" "$directory/manifest.json" "$source_configuration" \
+      lex "$LEX_COMMIT")
+    [[ "$resume_decision" =~ ^(reuse|rebuild)[[:space:]][0-9a-f]{40}$ ]] \
+      || { echo "ERROR: invalid v4 corpus resume decision" >&2; exit 2; }
+    resume_action=${resume_decision%% *}
+    existing_ingester=${resume_decision##* }
+    if [ "$resume_action" = reuse ]; then
+      "${lex_cli[@]}" verify corpus --corpus "$directory"
+      {
+        echo "### Fresh corpus: $PUBLISHER"
+        echo "- already committed and verified: \`$baseline\`"
+        echo "- Lex materializer: \`$existing_ingester\`"
+        echo "- resumed by reviewed Lex: \`$LEX_COMMIT\`"
+      } >> "$GITHUB_STEP_SUMMARY"
+      return 0
+    fi
+    echo "rebuilding v4 $PUBLISHER because its reviewed source configuration changed"
   fi
 
   # The fresh writer stages beside the disposable checkout. Refuse before any publisher body
