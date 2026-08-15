@@ -174,7 +174,9 @@ jobs:
           }
 
           verify_absent_target() {
-            local phase="$1" repository="$work_root/$phase-repository.json"
+            local phase repository
+            phase="$1"
+            repository="$work_root/$phase-repository.json"
             github_get "$API/repos/$CORPUS_REPO" "$repository"
             jq -e --arg repo "$CORPUS_REPO" '
                 .full_name == $repo and .private == false and .visibility == "public"
@@ -228,7 +230,9 @@ jobs:
           }
 
           verify_pointer() {
-            local phase="$1" observed file="$work_root/$phase-pointer.json"
+            local phase observed file
+            phase="$1"
+            file="$work_root/$phase-pointer.json"
             if ! observed=$(az storage blob show --auth-mode login --only-show-errors \
                 --account-name "$STORAGE_ACCOUNT" --container-name "$STORAGE_CONTAINER" \
                 --name "$POINTER_NAME" -o json); then
