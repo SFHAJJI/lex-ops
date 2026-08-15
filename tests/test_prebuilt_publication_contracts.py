@@ -643,6 +643,45 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
                 '! validate_draft_inventory "$UNKNOWN" "$EXPECTED" true\n', check=False)
             self.assertEqual(0, completed.returncode, completed.stderr)
 
+    def test_transient_draft_locator_failure_never_creates_a_release(self):
+        bash = Path(r"C:\Program Files\Git\bin\bash.exe") if sys.platform == "win32" else Path("/bin/bash")
+        if not bash.exists():
+            self.skipTest("bash is required")
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            root = Path(temporary)
+            environment = os.environ.copy()
+            environment.update({
+                "MOCK_LOG": (root / "calls.log").as_posix(),
+                "RELEASE_SCRIPT": RELEASE.as_posix(),
+                "TEST_ROOT": root.as_posix(),
+            })
+            completed = subprocess.run(
+                [str(bash)], env=environment, text=True, capture_output=True, check=False,
+                input=r'''set -euo pipefail
+. "$RELEASE_SCRIPT"
+work_root=$TEST_ROOT
+repo=SFHAJJI/lex-corpus-eu-eurlex
+tag=index-eu-eurlex-test
+CORPUS_COMMIT=1111111111111111111111111111111111111111
+PUBLISHER=eu-eurlex
+ticket_id=2222222222222222222222222222222222222222222222222222222222222222
+release_notes=notes
+release_id=
+require_github_immutable_releases() { :; }
+write_asset_inventory() { printf '[]' > "$2"; }
+jq() { printf '{}'; }
+gh() { printf 'gh %s\n' "$*" >> "$MOCK_LOG"; return 75; }
+gh_api() {
+  printf 'gh_api %s\n' "$*" >> "$MOCK_LOG"
+  [[ " $* " == *" --method POST " ]] && return 0
+  return 75
+}
+! prepare_exact_draft "$TEST_ROOT"
+! grep -q -- '--method POST' "$MOCK_LOG"
+''')
+            self.assertEqual(0, completed.returncode, completed.stderr)
+
     def staging_snapshot(self):
         prefix = f"staging/{self.publisher}/{self.ticket}"
         common = {

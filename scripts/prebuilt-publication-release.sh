@@ -179,10 +179,22 @@ fetch_release_snapshot() {
 
 discover_exact_draft() {
   local locator="$work_root/draft-locator.json" snapshot="$work_root/draft-discovered.json"
-  gh release view "$tag" --repo "$repo" --json databaseId,tagName > "$locator" 2>/dev/null \
-    || return 1
+  local owner="${repo%%/*}" name="${repo#*/}" query
+  [ -n "$owner" ] && [ -n "$name" ] && [ "$repo" = "$owner/$name" ] && [[ "$name" != */* ]] \
+    || return 2
+  query='query($owner:String!,$name:String!,$tag:String!){repository(owner:$owner,name:$name){nameWithOwner release(tagName:$tag){databaseId tagName}}}'
+  gh_api graphql -f query="$query" -f owner="$owner" -f name="$name" -f tag="$tag" \
+    > "$locator" 2>/dev/null || return 2
+  jq -e --arg repo "$repo" '
+      ((.errors // []) == []) and .data.repository.nameWithOwner == $repo
+      and (.data.repository | has("release"))
+      and (.data.repository.release == null or (.data.repository.release | type) == "object")
+    ' "$locator" >/dev/null || return 2
+  if jq -e '.data.repository.release == null' "$locator" >/dev/null; then
+    return 1
+  fi
   release_id=$(jq -er --arg tag "$tag" '
-      select(.tagName == $tag) | .databaseId
+      .data.repository.release | select(.tagName == $tag) | .databaseId
       | select(type == "number" and . > 0 and . == floor)
     ' "$locator") || return 2
   fetch_release_snapshot "$snapshot" || return 2
