@@ -63,6 +63,25 @@ jobs:
       AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
     steps:
+      - name: Read immutable-release setting at entry
+        shell: bash
+        env:
+          IMMUTABLE_RELEASES_READ_TOKEN: ${{ secrets.IMMUTABLE_RELEASES_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ -n "${IMMUTABLE_RELEASES_READ_TOKEN:-}" ]] \
+            || { echo "::error::immutable-release setting read credential is unavailable"; exit 1; }
+          output="$RUNNER_TEMP/immutable-release-setting-entry.json"
+          GH_TOKEN="$IMMUTABLE_RELEASES_READ_TOKEN" gh api --method GET \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$EVALUATION_REPOSITORY/immutable-releases" > "$output"
+          jq -e '
+            type == "object"
+            and .enabled == true
+            and ((.enforced_by_owner | type) == "boolean")
+          ' "$output" >/dev/null \
+            || { echo "::error::Immutable Releases is not enabled exactly"; exit 1; }
+
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Download the exact draft or immutable public evidence
@@ -275,8 +294,6 @@ jobs:
           entry_setting="$RUNNER_TEMP/immutable-release-setting-entry.json"
           entry_recheck="$RUNNER_TEMP/evaluation-release-entry-recheck.json"
           entry_tag="$RUNNER_TEMP/evaluation-release-entry-tag.json"
-          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$EVALUATION_REPOSITORY/immutable-releases" > "$entry_setting"
           fetch_release_snapshot "$entry_recheck"
           entry_attest=false
           if [ "$release_state" = public ]; then
@@ -339,8 +356,8 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Authenticate, sign, verify, and publish the evidence
-        id: publish
+      - name: Authenticate, sign, verify, and stage the evidence
+        id: prepare
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -367,7 +384,9 @@ jobs:
           finish() {
             local status=$?
             trap - EXIT TERM INT
-            cleanup_candidate || status=1
+            if [ "$status" -ne 0 ]; then
+              cleanup_candidate || status=1
+            fi
             exit "$status"
           }
           trap finish EXIT TERM INT
@@ -742,18 +761,71 @@ jobs:
               --image-digest "$BOOTSTRAP_EXPECTED_IMAGE_DIGEST" \
               --cases-sha256 "$CASES_SHA"
           fi
-          release_notes="Signed production release evidence for candidate revision $CANDIDATE_REVISION. Promotion independently revalidates this package against Azure and the live candidate attestation."
-          if [ "$BOOTSTRAP_MODE" = "true" ]; then
-            release_notes="$release_notes Bootstrap fallback $BOOTSTRAP_ROLLBACK_REVISION is a signed canonical-template/image equivalent first-release fallback; it is not independently evaluated."
-          fi
           release_names="$RUNNER_TEMP/evaluation-release-names.json"
           printf '%s\n' "${release_assets[@]##*/}" \
             | jq -Rsc 'split("\n") | map(select(length > 0)) | sort' > "$release_names"
+
+      - name: Recheck immutable-release setting before publication
+        if: env.PUBLIC_RETRY != 'true'
+        shell: bash
+        env:
+          IMMUTABLE_RELEASES_READ_TOKEN: ${{ secrets.IMMUTABLE_RELEASES_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ -n "${IMMUTABLE_RELEASES_READ_TOKEN:-}" ]] \
+            || { echo "::error::immutable-release setting read credential is unavailable"; exit 1; }
+          output="$RUNNER_TEMP/immutable-release-setting-prepublish.json"
+          GH_TOKEN="$IMMUTABLE_RELEASES_READ_TOKEN" gh api --method GET \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$EVALUATION_REPOSITORY/immutable-releases" > "$output"
+          jq -e '
+            type == "object"
+            and .enabled == true
+            and ((.enforced_by_owner | type) == "boolean")
+          ' "$output" >/dev/null \
+            || { echo "::error::Immutable Releases is not enabled immediately before publication"; exit 1; }
+
+      - name: Publish the exact immutable evidence
+        id: publish
+        if: env.PUBLIC_RETRY != 'true'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          . "$EVALUATION_RELEASE_CONTRACT"
+          . lex/scripts/deploy/az-retry.sh
+          . lex/scripts/deploy/az-reauth.sh
+          candidate_owned=true
+          cleanup_candidate() {
+            local attempt active
+            [ "$candidate_owned" = "true" ] || return 0
+            [ ! -f "$RUNNER_TEMP/bootstrap-publication-cleanup-relinquished" ] \
+              || return 0
+            az_reauth || true
+            for attempt in 1 2 3 4 5; do
+              az containerapp revision deactivate -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+                --revision "$CANDIDATE_REVISION" >/dev/null 2>&1 || true
+              active=$(az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+                --revision "$CANDIDATE_REVISION" --query properties.active -o tsv 2>/dev/null || true)
+              [ "$active" = "false" ] && return 0
+              sleep "$attempt"
+            done
+            echo "::error::candidate revision could not be returned to inactive state"
+            return 1
+          }
+          finish() {
+            local status=$?
+            trap - EXIT TERM INT
+            if [ "$status" -ne 0 ]; then
+              cleanup_candidate || status=1
+            fi
+            exit "$status"
+          }
+          trap finish EXIT TERM INT
+          echo "candidate_owned=true" >> "$GITHUB_OUTPUT"
+          release_names="$RUNNER_TEMP/evaluation-release-names.json"
           prepublish_setting="$RUNNER_TEMP/immutable-release-setting-prepublish.json"
           prepublish_release="$RUNNER_TEMP/evaluation-release-prepublish.json"
           prepublish_tag="$RUNNER_TEMP/evaluation-release-prepublish-tag.json"
-          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$EVALUATION_REPOSITORY/immutable-releases" > "$prepublish_setting"
           fetch_release_snapshot "$prepublish_release"
           gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
             "repos/$EVALUATION_REPOSITORY/git/ref/tags/$EVALUATION_RELEASE" > "$prepublish_tag"
@@ -765,21 +837,52 @@ jobs:
             # The publish API may succeed even if the runner is cancelled before its response is
             # observed. Relinquish cleanup ownership before that ambiguous boundary so public
             # signed evidence can never be followed by automatic C deactivation and R purging.
+            : > "$RUNNER_TEMP/bootstrap-publication-cleanup-relinquished"
             candidate_owned=false
             echo "candidate_owned=false" >> "$GITHUB_OUTPUT"
+          fi
+          release_notes="Signed production release evidence for candidate revision $CANDIDATE_REVISION. Promotion independently revalidates this package against Azure and the live candidate attestation."
+          if [ "$BOOTSTRAP_MODE" = "true" ]; then
+            release_notes="$release_notes Bootstrap fallback $BOOTSTRAP_ROLLBACK_REVISION is a signed canonical-template/image equivalent first-release fallback; it is not independently evaluated."
           fi
           gh release edit "$EVALUATION_RELEASE" --draft=false --latest=false \
             --repo "$EVALUATION_REPOSITORY" \
             --title "Lex assistant evaluation ${CODE_COMMIT:0:12}" \
             --notes "$release_notes"
+
+      - name: Recheck immutable-release setting after publication
+        if: env.PUBLIC_RETRY != 'true'
+        shell: bash
+        env:
+          IMMUTABLE_RELEASES_READ_TOKEN: ${{ secrets.IMMUTABLE_RELEASES_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ -n "${IMMUTABLE_RELEASES_READ_TOKEN:-}" ]] \
+            || { echo "::error::immutable-release setting read credential is unavailable"; exit 1; }
+          output="$RUNNER_TEMP/immutable-release-setting-published.json"
+          GH_TOKEN="$IMMUTABLE_RELEASES_READ_TOKEN" gh api --method GET \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$EVALUATION_REPOSITORY/immutable-releases" > "$output"
+          jq -e '
+            type == "object"
+            and .enabled == true
+            and ((.enforced_by_owner | type) == "boolean")
+          ' "$output" >/dev/null \
+            || { echo "::error::Immutable Releases is not enabled immediately after publication"; exit 1; }
+
+      - name: Verify the published immutable evidence
+        if: env.PUBLIC_RETRY != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          . "$EVALUATION_RELEASE_CONTRACT"
+          release_names="$RUNNER_TEMP/evaluation-release-names.json"
+          published_setting="$RUNNER_TEMP/immutable-release-setting-published.json"
           release_verified=false
           for attempt in {1..12}; do
-            published_setting="$RUNNER_TEMP/immutable-release-setting-published.json"
             published_release="$RUNNER_TEMP/evaluation-release-published.json"
             published_tag="$RUNNER_TEMP/evaluation-release-published-tag.json"
-            if gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
-                "repos/$EVALUATION_REPOSITORY/immutable-releases" > "$published_setting" \
-              && fetch_release_snapshot "$published_release" \
+            if fetch_release_snapshot "$published_release" \
               && gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
                 "repos/$EVALUATION_REPOSITORY/git/ref/tags/$EVALUATION_RELEASE" \
                 > "$published_tag" \
@@ -796,10 +899,17 @@ jobs:
             || { echo "::error::published release never became immutable and exact"; exit 1; }
 
       - name: Always restore one active quota authority
-        if: always() && steps.publish.outputs.candidate_owned == 'true'
+        if: >-
+          always()
+          && steps.prepare.outputs.candidate_owned == 'true'
+          && steps.publish.outputs.candidate_owned != 'false'
         shell: bash
         run: |
           set -euo pipefail
+          if [ -f "$RUNNER_TEMP/bootstrap-publication-cleanup-relinquished" ]; then
+            echo "candidate cleanup authority was relinquished before publication"
+            exit 0
+          fi
           . lex/scripts/deploy/az-retry.sh
           . lex/scripts/deploy/az-reauth.sh
           az_reauth

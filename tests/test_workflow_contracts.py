@@ -536,6 +536,161 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
         self.assertNotIn('gh release upload "$EVALUATION_RELEASE"', post_publish)
         self.assertNotIn('gh release download "$EVALUATION_RELEASE"', post_publish)
 
+    def test_evaluation_split_preserves_candidate_cleanup_authority(self):
+        workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(
+            encoding="utf-8"
+        )
+        prepare_start = workflow.index(
+            "- name: Authenticate, sign, verify, and stage the evidence"
+        )
+        publish_start = workflow.index("- name: Publish the exact immutable evidence")
+        postcheck_start = workflow.index(
+            "- name: Recheck immutable-release setting after publication"
+        )
+        prepare = workflow[prepare_start:publish_start]
+        publish = workflow[publish_start:postcheck_start]
+
+        self.assertIn('if [ "$status" -ne 0 ]; then', prepare)
+        self.assertIn("cleanup_candidate || status=1", prepare)
+        self.assertIn("trap finish EXIT TERM INT", prepare)
+
+        self.assertIn(". lex/scripts/deploy/az-retry.sh", publish)
+        self.assertIn(". lex/scripts/deploy/az-reauth.sh", publish)
+        self.assertIn("cleanup_candidate()", publish)
+        self.assertIn('if [ "$status" -ne 0 ]; then', publish)
+        self.assertIn("cleanup_candidate || status=1", publish)
+        self.assertIn("trap finish EXIT TERM INT", publish)
+        marker = "bootstrap-publication-cleanup-relinquished"
+        marker_guard = publish.index(f'[ ! -f "$RUNNER_TEMP/{marker}" ]')
+        self.assertIn("|| return 0", publish[marker_guard : publish.index("az_reauth")])
+        marker_write = publish.index(f': > "$RUNNER_TEMP/{marker}"')
+        relinquish = publish.index(
+            'echo "candidate_owned=false" >> "$GITHUB_OUTPUT"'
+        )
+        boundary = publish.index('gh release edit "$EVALUATION_RELEASE"')
+        self.assertLess(marker_write, relinquish)
+        self.assertLess(relinquish, boundary)
+
+        self.assertIn(
+            "steps.prepare.outputs.candidate_owned == 'true'",
+            workflow,
+        )
+        self.assertIn(
+            "steps.publish.outputs.candidate_owned != 'false'",
+            workflow,
+        )
+        cleanup_start = workflow.index("- name: Always restore one active quota authority")
+        summary_start = workflow.index("- name: Publication summary", cleanup_start)
+        cleanup = workflow[cleanup_start:summary_start]
+        self.assertLess(
+            cleanup.index(f'[ -f "$RUNNER_TEMP/{marker}" ]'),
+            cleanup.index(". lex/scripts/deploy/az-retry.sh"),
+        )
+
+    def test_immutable_setting_credential_executes_exactly_three_bounded_gets(self):
+        candidate = (
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+            / "Git"
+            / "bin"
+            / "bash.exe"
+        )
+        bash = str(candidate) if candidate.is_file() else shutil.which("bash")
+        if bash is None or shutil.which("jq") is None:
+            self.skipTest("bash and jq are required for credential boundary tests")
+
+        workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(
+            encoding="utf-8"
+        )
+        step_pattern = re.compile(
+            r"^      - name: (?P<name>[^\r\n]+)\r?\n(?P<body>.*?)"
+            r"(?=^      - (?:name:|uses:)|\Z)",
+            re.MULTILINE | re.DOTALL,
+        )
+        steps = {
+            match.group("name"): match.group("body")
+            for match in step_pattern.finditer(workflow)
+        }
+        names = (
+            "Read immutable-release setting at entry",
+            "Recheck immutable-release setting before publication",
+            "Recheck immutable-release setting after publication",
+        )
+        scripts = []
+        for name in names:
+            body = steps[name]
+            marker = "        run: |\n"
+            self.assertIn(marker, body)
+            scripts.append(textwrap.dedent(body.split(marker, 1)[1]))
+
+        mock = r'''gh() {
+  printf '%s\t%s\n' "${GH_TOKEN:-}" "$*" >> "$GH_AUDIT"
+  printf '%s\n' "$GH_RESPONSE"
+}
+'''
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            directory = Path(temporary)
+            audit = directory / "gh-audit.log"
+            audit.write_text("", encoding="utf-8")
+            environment = {
+                **os.environ,
+                "EVALUATION_REPOSITORY": "SFHAJJI/lex-ops",
+                "GH_AUDIT": audit.as_posix(),
+                "GH_RESPONSE": json.dumps(
+                    {"enabled": True, "enforced_by_owner": False}
+                ),
+                "GH_TOKEN": "workflow-token",
+                "IMMUTABLE_RELEASES_READ_TOKEN": "bounded-admin-read",
+                "RUNNER_TEMP": directory.as_posix(),
+            }
+            for name, script in zip(names, scripts):
+                completed = subprocess.run(
+                    [bash, "-c", mock + script],
+                    cwd=ROOT,
+                    env=environment,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                with self.subTest(step=name):
+                    self.assertEqual(0, completed.returncode, completed.stderr)
+
+            calls = audit.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(3, len(calls), calls)
+            for call in calls:
+                token, arguments = call.split("\t", 1)
+                self.assertEqual("bounded-admin-read", token)
+                self.assertEqual(
+                    "api --method GET -H X-GitHub-Api-Version: 2026-03-10 "
+                    "repos/SFHAJJI/lex-ops/immutable-releases",
+                    arguments,
+                )
+
+            missing = subprocess.run(
+                [bash, "-c", mock + scripts[0]],
+                cwd=ROOT,
+                env={**environment, "IMMUTABLE_RELEASES_READ_TOKEN": ""},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(0, missing.returncode)
+            self.assertEqual(3, len(audit.read_text(encoding="utf-8").splitlines()))
+
+            disabled = subprocess.run(
+                [bash, "-c", mock + scripts[0]],
+                cwd=ROOT,
+                env={
+                    **environment,
+                    "GH_RESPONSE": json.dumps(
+                        {"enabled": False, "enforced_by_owner": False}
+                    ),
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(0, disabled.returncode)
+
     def test_evaluation_public_retry_verifies_without_mutating_the_release(self):
         workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(encoding="utf-8")
         retry_start = workflow.index('if [ "$PUBLIC_RETRY" = "true" ]')
@@ -806,6 +961,7 @@ fetch_release_snapshot "$2"
 
     def test_evaluation_release_is_attested_before_azure_and_frozen_exactly(self):
         workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertIn("attestations: read", workflow)
         self.assertIn("WORKFLOW_COMMIT: ${{ github.sha }}", workflow)
@@ -824,6 +980,90 @@ fetch_release_snapshot "$2"
             'repos/$EVALUATION_REPOSITORY/releases/tags/$EVALUATION_RELEASE',
             workflow,
         )
+
+        secret_binding = (
+            "IMMUTABLE_RELEASES_READ_TOKEN: "
+            "${{ secrets.IMMUTABLE_RELEASES_READ_TOKEN }}"
+        )
+        step_pattern = re.compile(
+            r"^      - name: (?P<name>[^\r\n]+)\r?\n(?P<body>.*?)"
+            r"(?=^      - (?:name:|uses:)|\Z)",
+            re.MULTILINE | re.DOTALL,
+        )
+        secret_steps = [
+            (match.group("name"), match.group("body"))
+            for match in step_pattern.finditer(workflow)
+            if secret_binding in match.group("body")
+        ]
+        self.assertEqual(
+            [
+                "Read immutable-release setting at entry",
+                "Recheck immutable-release setting before publication",
+                "Recheck immutable-release setting after publication",
+            ],
+            [name for name, _ in secret_steps],
+        )
+        self.assertEqual(3, workflow.count(secret_binding))
+        self.assertNotIn("secrets.LEX_OPS_TOKEN", workflow)
+        self.assertEqual(
+            3,
+            workflow.count(
+                'GH_TOKEN="$IMMUTABLE_RELEASES_READ_TOKEN" gh api --method GET'
+            ),
+        )
+        self.assertEqual(
+            3,
+            workflow.count('repos/$EVALUATION_REPOSITORY/immutable-releases'),
+        )
+        self.assertNotIn("read_immutable_release_setting", workflow)
+        expected_details = {
+            "Read immutable-release setting at entry": (
+                "immutable-release-setting-entry.json",
+                "Immutable Releases is not enabled exactly",
+            ),
+            "Recheck immutable-release setting before publication": (
+                "immutable-release-setting-prepublish.json",
+                "Immutable Releases is not enabled immediately before publication",
+            ),
+            "Recheck immutable-release setting after publication": (
+                "immutable-release-setting-published.json",
+                "Immutable Releases is not enabled immediately after publication",
+            ),
+        }
+        for name, body in secret_steps:
+            with self.subTest(step=name):
+                if name == "Read immutable-release setting at entry":
+                    self.assertNotIn("if: env.PUBLIC_RETRY", body)
+                else:
+                    self.assertIn("if: env.PUBLIC_RETRY != 'true'", body)
+                marker = "        run: |\n"
+                self.assertIn(marker, body)
+                lines = [
+                    line.strip()
+                    for line in textwrap.dedent(body.split(marker, 1)[1]).splitlines()
+                    if line.strip()
+                ]
+                output, error = expected_details[name]
+                self.assertEqual(
+                    [
+                        "set -euo pipefail",
+                        '[[ -n "${IMMUTABLE_RELEASES_READ_TOKEN:-}" ]] \\',
+                        '|| { echo "::error::immutable-release setting read credential is unavailable"; exit 1; }',
+                        f'output="$RUNNER_TEMP/{output}"',
+                        'GH_TOKEN="$IMMUTABLE_RELEASES_READ_TOKEN" gh api --method GET \\',
+                        "-H 'X-GitHub-Api-Version: 2026-03-10' \\",
+                        '"repos/$EVALUATION_REPOSITORY/immutable-releases" > "$output"',
+                        "jq -e '",
+                        'type == "object"',
+                        "and .enabled == true",
+                        'and ((.enforced_by_owner | type) == "boolean")',
+                        "' \"$output\" >/dev/null \\",
+                        f'|| {{ echo "::error::{error}"; exit 1; }}',
+                    ],
+                    lines,
+                )
+        self.assertIn("`IMMUTABLE_RELEASES_READ_TOKEN`", readme)
+        self.assertIn("at most three bounded Immutable Releases setting reads", readme)
 
         identity = workflow.index("scripts/assistant_evaluation_identity.py")
         tag_creation = workflow.index('ensure_release_tag "$release_state"', identity)
@@ -845,9 +1085,13 @@ fetch_release_snapshot "$2"
         self.assertLess(immutable_recheck, exact_draft_recheck)
         self.assertLess(exact_draft_recheck, publish)
 
-        poll = workflow.index("for attempt in {1..12}", publish)
+        immutable_postcheck = workflow.index(
+            "immutable-release-setting-published.json", publish
+        )
+        poll = workflow.index("for attempt in {1..12}", immutable_postcheck)
         final_verify = workflow.index("validate_release_snapshot public evidence", poll)
-        self.assertLess(publish, poll)
+        self.assertLess(publish, immutable_postcheck)
+        self.assertLess(immutable_postcheck, poll)
         self.assertLess(poll, final_verify)
 
         asset_start = workflow.index("          release_assets=(")
