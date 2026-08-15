@@ -81,7 +81,7 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
-      - name: Azure login for staging, release storage, and signing
+      - name: Azure login for private staging, coordination, and signing
         uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}

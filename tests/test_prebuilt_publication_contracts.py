@@ -9,7 +9,21 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "publish-prebuilt-index.yml"
 PUBLISH = ROOT / "publish-prebuilt-index.sh"
+BUILD = ROOT / "scripts" / "prebuilt-publication-build.sh"
+RELEASE = ROOT / "scripts" / "prebuilt-publication-release.sh"
 CONTRACT = ROOT / "scripts" / "prebuilt_publication_contract.py"
+
+
+def expanded_publisher():
+    script = PUBLISH.read_text(encoding="utf-8")
+    script = script.replace(
+        '. "$ops_root/scripts/prebuilt-publication-build.sh"',
+        BUILD.read_text(encoding="utf-8"),
+    )
+    return script.replace(
+        '. "$ops_root/scripts/prebuilt-publication-release.sh"',
+        RELEASE.read_text(encoding="utf-8"),
+    )
 
 
 class PrebuiltPublicationContractTests(unittest.TestCase):
@@ -170,14 +184,25 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
 
     def test_public_release_and_tag_must_be_immutable_and_exact(self):
         tag = f"index-{self.publisher}-{self.ticket}"
-        expected_assets = ["a.json", "b.sig"]
+        expected_assets = [
+            {"name": "a.json", "sha256": "3" * 64, "size": 123},
+            {"name": "b.sig", "sha256": "4" * 64, "size": 456},
+        ]
         release = {
             "draft": False,
             "prerelease": False,
             "tag_name": tag,
             "target_commitish": self.corpus,
             "immutable": True,
-            "assets": [{"name": name} for name in expected_assets],
+            "assets": [
+                {
+                    "name": asset["name"],
+                    "state": "uploaded",
+                    "size": asset["size"],
+                    "digest": f"sha256:{asset['sha256']}",
+                }
+                for asset in expected_assets
+            ],
         }
         tag_ref = {
             "object": {
@@ -215,6 +240,14 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
                         expected_assets,
                     ).returncode,
                 )
+        oversized = json.loads(json.dumps(expected_assets))
+        oversized[0]["size"] = 2147483648
+        self.assertNotEqual(
+            0,
+            self.run_contract(
+                "validate-release", release, tag_ref, tag, self.corpus, oversized
+            ).returncode,
+        )
         wrong_ref = {"object": {"type": "tag", "sha": self.corpus}}
         self.assertNotEqual(
             0,
@@ -227,10 +260,44 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
                 expected_assets,
             ).returncode,
         )
+        for field, value in (
+            ("digest", "sha256:" + "0" * 64),
+            ("size", 999),
+            ("state", "new"),
+        ):
+            wrong_asset = json.loads(json.dumps(release))
+            wrong_asset["assets"][0][field] = value
+            with self.subTest(asset_field=field):
+                self.assertNotEqual(
+                    0,
+                    self.run_contract(
+                        "validate-release",
+                        wrong_asset,
+                        tag_ref,
+                        tag,
+                        self.corpus,
+                        expected_assets,
+                    ).returncode,
+                )
+
+    def test_immutable_release_setting_requires_enabled_true(self):
+        enabled = self.run_contract(
+            "validate-immutable-release-setting", {"enabled": True}
+        )
+        self.assertEqual(0, enabled.returncode, enabled.stderr)
+        for setting in ({"enabled": False}, {}, {"enabled": "true"}):
+            with self.subTest(setting=setting):
+                self.assertNotEqual(
+                    0,
+                    self.run_contract(
+                        "validate-immutable-release-setting", setting
+                    ).returncode,
+                )
 
     def test_workflow_and_script_close_every_release_blocker(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        script = PUBLISH.read_text(encoding="utf-8")
+        script = expanded_publisher()
+        contract = CONTRACT.read_text(encoding="utf-8")
 
         for input_name in (
             "workflow_commit",
@@ -259,12 +326,18 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
         self.assertIn("WORKFLOW_COMMIT", script)
         self.assertIn("git rev-parse HEAD", script)
 
-        blob_verification = script[script.index("verify_blob_asset()") :]
-        self.assertIn("storage blob download", blob_verification)
-        self.assertIn('--if-match "$remote_etag"', blob_verification)
-        self.assertIn('sha256sum "$downloaded"', blob_verification)
-        self.assertIn("immutability-policy set", script)
-        self.assertIn("policyMode", script)
+        self.assertNotIn("lex-releases", script)
+        self.assertNotIn("publish_blob_bundle", script)
+        self.assertNotIn("verify_blob_bundle", script)
+        self.assertNotIn("storage container-rm", script)
+        self.assertNotIn("storage container immutability-policy", script)
+        self.assertNotIn("storage blob immutability-policy set", script)
+        self.assertIn("validate-immutable-release-setting", script)
+        self.assertIn('setting.get("enabled") is not True', contract)
+        self.assertIn('gh release verify "$tag" --repo "$repo"', script)
+        self.assertIn('gh release verify-asset "$tag"', script)
+        self.assertIn('"sha256:" + expected["sha256"]', contract)
+        self.assertIn('"$asset_size" -lt 2147483648', script)
 
         self.assertIn("AZURE_KEY_VERSION=29f1df16fbc34bc7af12f47430cc5acc", script)
         self.assertIn(
@@ -281,16 +354,25 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
 
         self.assertIn('--target "$CORPUS_COMMIT"', script)
         self.assertIn("immutable-releases", script)
+        self.assertIn('X-GitHub-Api-Version: 2026-03-10', script)
         self.assertIn("validate-release", script)
         self.assertIn("merge-base --is-ancestor", script)
         self.assertIn("signed previous pointer evidence", script)
+        self.assertIn('release_tag:$tag', script)
+        self.assertIn('release_repository:$repository', script)
+        self.assertIn('receipt_manifest_sha256:$receipt', script)
+        self.assertIn('.release_tag == $pointer[0].release_tag', script)
+        self.assertIn(
+            'receipt_manifest_id=$(sha256_file "$previous_dir/$cleanup_manifest")',
+            script,
+        )
+        self.assertIn('$(jq -er .receipt_manifest_sha256 "$pointer")', script)
 
         publish_case = script[script.index('case "$PUBLICATION_PHASE" in') :]
         cleanup_case = publish_case.index("postflight-cleanup)")
         self.assertNotIn("cleanup_exact_blob", publish_case[:cleanup_case])
         self.assertIn("cleanup_exact_blob", publish_case[cleanup_case:])
         self.assertIn("verify public GitHub release", publish_case[cleanup_case:])
-        self.assertIn("verify immutable Blob release", publish_case[cleanup_case:])
         self.assertIn("verify current artifact pointer", publish_case[cleanup_case:])
 
     def staging_snapshot(self):

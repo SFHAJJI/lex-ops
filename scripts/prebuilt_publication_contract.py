@@ -187,18 +187,48 @@ def validate_release(arguments):
     tag, corpus = arguments[2:4]
     expected_assets = read_json(arguments[4])
     if (
+        not isinstance(expected_assets, list)
+        or not expected_assets
+        or any(
+            not isinstance(asset, dict)
+            or set(asset) != {"name", "sha256", "size"}
+            or not isinstance(asset["name"], str)
+            or not isinstance(asset["sha256"], str)
+            or len(asset["sha256"]) != 64
+            or not isinstance(asset["size"], int)
+            or isinstance(asset["size"], bool)
+            or asset["size"] < 0
+            or asset["size"] >= 2147483648
+            for asset in expected_assets
+        )
+        or len({asset["name"] for asset in expected_assets}) != len(expected_assets)
+    ):
+        fail("expected GitHub release assets are not exact")
+    release_assets = release.get("assets", []) if isinstance(release, dict) else []
+    actual_by_name = {
+        asset.get("name"): asset
+        for asset in release_assets
+        if isinstance(asset, dict) and isinstance(asset.get("name"), str)
+    }
+    if (
         not isinstance(release, dict)
         or release.get("draft") is not False
         or release.get("prerelease") is not False
         or release.get("tag_name") != tag
         or release.get("target_commitish") != corpus
         or release.get("immutable") is not True
-        or sorted(
-            item.get("name") for item in release.get("assets", []) if isinstance(item, dict)
-        )
-        != sorted(expected_assets)
+        or len(actual_by_name) != len(release_assets)
+        or set(actual_by_name) != {asset["name"] for asset in expected_assets}
     ):
         fail("public GitHub release is not immutable and exact")
+    for expected in expected_assets:
+        actual = actual_by_name[expected["name"]]
+        if (
+            actual.get("state") != "uploaded"
+            or actual.get("size") != expected["size"]
+            or actual.get("digest") != "sha256:" + expected["sha256"]
+        ):
+            fail("GitHub release asset digest or size differs")
     tag_object = tag_ref.get("object", {})
     if (
         not isinstance(tag_object, dict)
@@ -208,11 +238,20 @@ def validate_release(arguments):
         fail("release tag does not target the ticketed corpus commit")
 
 
+def validate_immutable_release_setting(arguments):
+    if len(arguments) != 1:
+        fail("usage: validate-immutable-release-setting SETTING")
+    setting = read_json(arguments[0])
+    if not isinstance(setting, dict) or setting.get("enabled") is not True:
+        fail("repository immutable releases are not enabled")
+
+
 COMMANDS = {
     "validate-benchmark": validate_benchmark,
     "validate-staging-snapshot": validate_staging_snapshot,
     "validate-staging-cleanup-snapshot": validate_staging_cleanup_snapshot,
     "validate-release": validate_release,
+    "validate-immutable-release-setting": validate_immutable_release_setting,
 }
 
 

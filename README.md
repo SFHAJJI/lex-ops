@@ -44,14 +44,19 @@ EU releases also carry the exact reviewed `eu-scope.json` that selected their wo
 signed artifact, so a reviewer can reproduce which domains, languages, waves and relationship
 rules produced a particular index.
 
-Key-Vault-signed releases are written first to the private `stlexindexes/lex` Blob container under
-`releases/<publisher>/<manifest-sha256>/`. Only after every versioned asset upload succeeds does
-Fleet replace `current/<publisher>.json`. The pointer is only discovery metadata: the application
-still verifies the externally pinned signature and every manifest hash before serving anything.
-GitHub Releases remains a public mirror while every individual asset is at most 2 GiB. If an asset
-crosses that platform limit, Blob remains canonical and Container App image deployment is blocked
-until the measured VM/local-disk path is active; Fleet never deploys a mixture of old and new
-publisher releases.
+Private staging, exactly-once coordination claims and mutable discovery pointers live in
+`stlexindexes/lex`; none is a runtime trust root. The sole canonical published copy is one exact
+immutable GitHub Release in the publisher's corpus repository. Publication requires the repository
+setting to report `enabled: true`, publishes a draft targeted at the ticketed corpus commit, and
+then verifies the locked tag, API asset digests, downloaded bytes, signed manifests and GitHub's
+cryptographic release and per-asset attestations.
+
+Only after that verification does Fleet compare-and-swap `lex/current/<publisher>.json`. This
+pointer is discovery metadata only: deployment ignores it and pins one exact immutable GitHub tag
+per publisher. The current path rejects any individual asset at or above GitHub's 2 GiB limit.
+Azure container-level WORM is a future, separately authorized option only if an asset approaches
+that limit, Azure must become canonical independently of GitHub, or a fixed regulatory retention
+period is required; see the storage decision record.
 
 The derived `lex-articles` repository carries canonical `lex-articles-generation/3`
 `generation.json`. Each publisher entry binds the exact corpus commit and manifest digest,
@@ -122,7 +127,7 @@ build ticket. The OIDC runner re-downloads and checks the bytes, verifies that t
 the ticket's exact collection, corpus manifest, derived generation, Lex build commit and content
 digest, resolves the pinned model and publisher-bound source scope, creates the whole-artifact
 manifest, signs it with Key Vault, runs the public benchmark,
-and only then updates the immutable Blob/GitHub releases and deployment pointer. Staging is never a
+    and only then publishes and attests the immutable GitHub release and updates the discovery pointer. Staging is never a
 runtime source, and unsigned, mislabelled or hash-mismatched artifacts cannot be promoted.
 
 The normal Fleet run remains the default for routine acquisition and derivation. Index construction
