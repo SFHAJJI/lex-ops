@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -539,7 +540,8 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
         self.assertNotIn("$cleanup_manifest", legacy)
         self.assertNotIn("$cleanup_signature", legacy)
 
-        self.assertIn('--target "$CORPUS_COMMIT"', script)
+        self.assertIn('--arg target "$CORPUS_COMMIT"', script)
+        self.assertIn('target_commitish:$target', script)
         self.assertIn("immutable-releases", script)
         self.assertIn('X-GitHub-Api-Version: 2026-03-10', script)
         self.assertIn("validate-release", script)
@@ -563,6 +565,83 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
         self.assertIn("cleanup_exact_blob", publish_case[cleanup_case:])
         self.assertIn("verify public GitHub release", publish_case[cleanup_case:])
         self.assertIn("verify current artifact pointer", publish_case[cleanup_case:])
+
+    def test_draft_release_is_pinned_by_numeric_id_before_tag_upload_and_publication(self):
+        script = RELEASE.read_text(encoding="utf-8")
+
+        self.assertIn("discover_exact_draft", script)
+        self.assertIn('repos/$repo/releases/$release_id', script)
+        self.assertIn('refs/tags/$tag', script)
+        self.assertIn('-f "ref=refs/tags/$tag"', script)
+        self.assertIn('"sha=$CORPUS_COMMIT"', script)
+        self.assertIn("https://uploads.github.com/repos/$repo/releases/$release_id/assets", script)
+        self.assertIn('--request PATCH', script)
+        self.assertIn('"https://api.github.com/repos/$repo/releases/$release_id"', script)
+        self.assertIn('--data-binary "@$work_root/publish-release.json"', script)
+
+        prepare = script[script.index("prepare_exact_draft()") :]
+        create_tag = prepare.index("ensure_exact_tag")
+        upload = prepare.index("upload_missing_assets")
+        self.assertLess(create_tag, upload, "the exact lightweight tag must exist before asset upload")
+        finalize = script[script.index("finalize_and_verify_public_release()") :]
+        self.assertLess(
+            finalize.index("require_github_immutable_releases"), finalize.index("--request PATCH")
+        )
+
+        for mutable_tag_lookup in (
+            'gh release create "$tag"',
+            'gh release upload "$tag"',
+            'gh release edit "$tag"',
+        ):
+            with self.subTest(mutable_tag_lookup=mutable_tag_lookup):
+                self.assertNotIn(mutable_tag_lookup, script)
+
+    def test_draft_inventory_accepts_only_exact_uploaded_assets(self):
+        bash = Path(r"C:\Program Files\Git\bin\bash.exe") if sys.platform == "win32" else Path("/bin/bash")
+        if not bash.exists() or subprocess.run(
+            [str(bash)], input="command -v jq >/dev/null", text=True, check=False
+        ).returncode:
+            self.skipTest("bash with jq is required")
+
+        digest = "a" * 64
+        expected = [{"name": "asset.bin", "sha256": digest, "size": 3}]
+        release = {
+            "id": 7,
+            "tag_name": "index-lu-legilux-" + "a" * 64,
+            "target_commitish": "c" * 40,
+            "name": "index-lu-legilux " + "a" * 12,
+            "body": "notes",
+            "published_at": None,
+            "draft": True,
+            "prerelease": False,
+            "immutable": False,
+            "assets": [{
+                "id": 11, "name": "asset.bin", "state": "uploaded",
+                "digest": "sha256:" + digest, "size": 3,
+            }],
+        }
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            root = Path(temporary)
+            paths = {"EXPECTED": root / "expected.json", "EXACT": root / "exact.json"}
+            paths["WRONG"] = root / "wrong.json"
+            paths["UNKNOWN"] = root / "unknown.json"
+            paths["EXPECTED"].write_text(json.dumps(expected), encoding="utf-8")
+            paths["EXACT"].write_text(json.dumps(release), encoding="utf-8")
+            wrong = json.loads(json.dumps(release)); wrong["assets"][0]["digest"] = "sha256:" + "b" * 64
+            unknown = json.loads(json.dumps(release)); unknown["assets"][0]["name"] = "unknown.bin"
+            paths["WRONG"].write_text(json.dumps(wrong), encoding="utf-8")
+            paths["UNKNOWN"].write_text(json.dumps(unknown), encoding="utf-8")
+            environment = os.environ.copy()
+            environment.update({key: value.as_posix() for key, value in paths.items()})
+            environment["RELEASE_SCRIPT"] = RELEASE.as_posix()
+            completed = subprocess.run([str(bash)], env=environment, text=True, capture_output=True,
+                input='set -euo pipefail\nrelease_id=7; tag="index-lu-legilux-' + "a" * 64 + '"; '
+                'CORPUS_COMMIT="' + "c" * 40 + '"; PUBLISHER=lu-legilux; ticket_id="' + "a" * 64 + '"; '
+                'release_notes=notes\n. "$RELEASE_SCRIPT"\n'
+                'validate_draft_inventory "$EXACT" "$EXPECTED" true\n'
+                '! validate_draft_inventory "$WRONG" "$EXPECTED" true\n'
+                '! validate_draft_inventory "$UNKNOWN" "$EXPECTED" true\n', check=False)
+            self.assertEqual(0, completed.returncode, completed.stderr)
 
     def staging_snapshot(self):
         prefix = f"staging/{self.publisher}/{self.ticket}"
