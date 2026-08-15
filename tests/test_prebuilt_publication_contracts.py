@@ -40,7 +40,7 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
     vectors_etag = "0xDEF456"
     index_size = 1234
     vectors_size = 5678
-    runtime_guard = "a76f3712a5f91dd4968a5aa71c61913f9c4f970b"
+    runtime_guard = "03f94295f3e678b47cb0511a082698f34373679c"
 
     def test_benchmark_must_be_an_exact_activation_decision(self):
         report = {
@@ -462,7 +462,7 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
 
         self.assertIn(
             "HYBRID_QUARANTINE_GUARD_COMMIT="
-            "a76f3712a5f91dd4968a5aa71c61913f9c4f970b",
+            "03f94295f3e678b47cb0511a082698f34373679c",
             script,
         )
         self.assertIn(
