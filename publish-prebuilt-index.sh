@@ -514,20 +514,6 @@ case "$PUBLICATION_PHASE" in
       echo "published_manifest=$manifest_id"
       exit 0
     fi
-    draft_status=0
-    if discover_exact_draft; then
-      if download_github_bundle draft; then
-        finalize_and_verify_public_release
-        publish_pointer_from_bundle "$bundle_root"
-        echo "published_manifest=$manifest_id"
-        exit 0
-      fi
-      echo "incomplete same-run draft found; rebuilding before publication" >&2
-    else
-      draft_status=$?
-      [ "$draft_status" = 1 ] \
-        || { echo "ERROR: existing draft locator is not exact" >&2; exit 1; }
-    fi
     echo "=== authenticate previous pointer and enforce monotonic corpus lineage ==="
     snapshot_current_pointer
     resolve_sources_and_build_bundle

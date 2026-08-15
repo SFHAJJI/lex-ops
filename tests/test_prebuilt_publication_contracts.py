@@ -596,6 +596,99 @@ class PrebuiltPublicationContractTests(unittest.TestCase):
             with self.subTest(mutable_tag_lookup=mutable_tag_lookup):
                 self.assertNotIn(mutable_tag_lookup, script)
 
+    def test_publish_lifecycle_authenticates_bundle_before_reusing_a_draft(self):
+        script = PUBLISH.read_text(encoding="utf-8")
+        publish_case = script[script.rindex('case "$PUBLICATION_PHASE" in') :]
+        publish_case = publish_case[: publish_case.index("postflight-cleanup)")]
+
+        self.assertNotIn("discover_exact_draft", publish_case)
+        ordered_steps = (
+            "snapshot_current_pointer",
+            "resolve_sources_and_build_bundle",
+            'verify_complete_bundle "$bundle_root"',
+            'prepare_exact_draft "$bundle_root"',
+            "finalize_and_verify_public_release",
+        )
+        offsets = [publish_case.index(step) for step in ordered_steps]
+        self.assertEqual(sorted(offsets), offsets)
+
+    def test_tag_creation_waits_for_exact_readback_and_fails_closed(self):
+        bash = Path(r"C:\Program Files\Git\bin\bash.exe") if sys.platform == "win32" else Path("/bin/bash")
+        if not bash.exists() or subprocess.run(
+            [str(bash)], input="command -v jq >/dev/null", text=True, check=False
+        ).returncode:
+            self.skipTest("bash with jq is required")
+
+        tag = "index-eu-eurlex-test"
+        corpus = "1" * 40
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            root = Path(temporary)
+            exact = root / "exact-tag.json"
+            wrong = root / "wrong-tag.json"
+            exact.write_text(json.dumps({
+                "ref": f"refs/tags/{tag}",
+                "object": {"type": "commit", "sha": corpus},
+            }), encoding="utf-8")
+            wrong.write_text(json.dumps({
+                "ref": f"refs/tags/{tag}",
+                "object": {"type": "commit", "sha": "2" * 40},
+            }), encoding="utf-8")
+            environment = os.environ.copy()
+            environment.update({
+                "EXACT": exact.as_posix(),
+                "WRONG": wrong.as_posix(),
+                "MOCK_LOG": (root / "calls.log").as_posix(),
+                "RELEASE_SCRIPT": RELEASE.as_posix(),
+                "TEST_ROOT": root.as_posix(),
+            })
+            completed = subprocess.run(
+                [str(bash)], env=environment, text=True, capture_output=True, check=False,
+                input=r'''set -euo pipefail
+. "$RELEASE_SCRIPT"
+case ${OSTYPE:-} in msys*) jq() { jq.exe "$@" | tr -d '\r'; } ;; esac
+work_root=$TEST_ROOT
+repo=SFHAJJI/lex-corpus-eu-eurlex
+tag=index-eu-eurlex-test
+CORPUS_COMMIT=1111111111111111111111111111111111111111
+get_count=0
+post_count=0
+sleep_count=0
+gh_api() {
+  if [ "$1" = --method ] && [ "$2" = POST ]; then
+    post_count=$((post_count + 1))
+    printf 'post\n' >> "$MOCK_LOG"
+    return 0
+  fi
+  [ "$1" = repos/SFHAJJI/lex-corpus-eu-eurlex/git/ref/tags/index-eu-eurlex-test ] \
+    || return 90
+  get_count=$((get_count + 1))
+  printf 'get %s\n' "$get_count" >> "$MOCK_LOG"
+  case "$MODE:$get_count" in
+    existing:1|propagates:3) cat "$EXACT" ;;
+    wrong:1) cat "$WRONG" ;;
+    *) return 1 ;;
+  esac
+}
+sleep() { sleep_count=$((sleep_count + 1)); printf 'sleep %s\n' "$1" >> "$MOCK_LOG"; }
+
+MODE=existing; get_count=0; post_count=0; sleep_count=0; : > "$MOCK_LOG"
+ensure_exact_tag
+[ "$get_count" = 1 ] && [ "$post_count" = 0 ] && [ "$sleep_count" = 0 ]
+
+MODE=propagates; get_count=0; post_count=0; sleep_count=0; : > "$MOCK_LOG"
+ensure_exact_tag
+[ "$get_count" = 3 ] && [ "$post_count" = 1 ] && [ "$sleep_count" = 1 ]
+
+MODE=exhausted; get_count=0; post_count=0; sleep_count=0; : > "$MOCK_LOG"
+! ensure_exact_tag
+[ "$get_count" = 13 ] && [ "$post_count" = 1 ] && [ "$sleep_count" = 11 ]
+
+MODE=wrong; get_count=0; post_count=0; sleep_count=0; : > "$MOCK_LOG"
+! ensure_exact_tag
+[ "$get_count" = 1 ] && [ "$post_count" = 0 ] && [ "$sleep_count" = 0 ]
+''')
+            self.assertEqual(0, completed.returncode, completed.stderr)
+
     def test_draft_inventory_accepts_only_exact_uploaded_assets(self):
         bash = Path(r"C:\Program Files\Git\bin\bash.exe") if sys.platform == "win32" else Path("/bin/bash")
         if not bash.exists() or subprocess.run(
