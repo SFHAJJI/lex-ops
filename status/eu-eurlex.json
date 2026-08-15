@@ -1,6 +1,7 @@
 {
   "publisher": "eu-eurlex",
-  "run": "2026-08-14T03:10:27Z",
-  "outcome": "ran_committed",
-  "works": 1250
+  "run": "2026-08-15T07:36:45Z",
+  "outcome": "fresh_v4_committed",
+  "works": 1250,
+  "corpus_commit": "e9c4df0981c855855a1a28218cf086ddeb5bb691"
 }

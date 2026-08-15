@@ -1,5 +1,6 @@
 {
   "publisher": "lex-articles",
-  "run": "2026-08-14T03:10:27Z",
-  "outcome": "ran_committed"
+  "run": "2026-08-15T07:36:45Z",
+  "outcome": "fresh_v4_committed",
+  "articles_commit": "3253b0fefcd5a9a6c1ec493c346f98e9d31bbc99"
 }
