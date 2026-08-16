@@ -601,6 +601,23 @@ jobs:
             sleep 3
           done
 
+          # The report describes the candidate or it does not, and when it does not the run says so
+          # without saying which field disagreed. These records are the whole input to that
+          # comparison, so they are printed before it runs rather than reconstructed from a stack
+          # trace afterwards.
+          echo "::group::candidate evidence as ARM returns it"
+          az_retry az rest --method get             --uri "https://management.azure.com$app_id/revisions/$CANDIDATE_REVISION?api-version=2025-07-01"             | jq '{name, active: .properties.active, traffic: .properties.trafficWeight,
+                   fqdn: .properties.fqdn, cpu: .properties.template.containers[0].resources.cpu,
+                   memory: .properties.template.containers[0].resources.memory,
+                   scale: .properties.template.scale,
+                   image: .properties.template.containers[0].image}' || true
+          echo "::endgroup::"
+          echo "::group::attestation the verifier reads from the candidate"
+          curl --fail --silent --show-error --max-time 30 "https://$candidate_fqdn/attestation.json"             | jq '{artifact_manifest_set, ids: ([.. | .manifest_id? // empty] | unique)}' || true
+          echo "::endgroup::"
+          echo "::group::what the signed report claims"
+          jq '{target: .identity.target, ids: .identity.index_manifest_ids}'             evidence/assistant-eval-report.json || true
+          echo "::endgroup::"
           dotnet run --project lex/src/Lex.Ingest/Lex.Ingest.csproj -c Release -- \
             assistant-eval verify-report \
             --report evidence/assistant-eval-report.json \
