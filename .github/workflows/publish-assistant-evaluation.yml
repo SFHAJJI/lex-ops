@@ -42,7 +42,10 @@ jobs:
   acquire_candidate_ownership:
     if: github.ref == 'refs/heads/main'
     permissions:
-      contents: read
+      # This job resolves the evaluation release while it is still a draft, and GitHub exposes
+      # draft releases only to tokens with push access. Read-only contents made every dispatch
+      # fail at the first step with "release not found", before any identity check could run.
+      contents: write
       id-token: write
     environment: production
     runs-on: ubuntu-latest
