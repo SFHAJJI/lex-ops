@@ -436,6 +436,8 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
                 "TARGET_MANIFEST_SET": report["identity"]["target"]["artifact_manifest_set"],
                 "TARGET_EVIDENCE_SHA": report["identity"]["target"]["evidence_sha256"],
                 "CASES_SHA": report["cases_sha256"],
+                "ADMISSION_RUN_IDENTITY": report["admission_run_identity"],
+                "ADMISSION_SHA": report["admission_sha256"],
                 "REPORT_SCHEMA": "lex-assistant-eval-report/3",
             },
             environment,
@@ -459,6 +461,10 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
         wrong_digest = self.report()
         wrong_digest["identity"]["target"]["evidence_sha256"] = "not-a-digest"
         cases.append((wrong_digest, None, None))
+
+        wrong_admission = self.report()
+        wrong_admission["admission_run_identity"] = "not-a-run"
+        cases.append((wrong_admission, None, None))
 
         for report, revision, release in cases:
             with self.subTest(report=report, revision=revision, release=release):
@@ -952,8 +958,52 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
         self.assertIn("project-owner review signature: verified", workflow)
         self.assertNotIn("independent review signature: verified", workflow)
         self.assertRegex(readme, r"verifies the project-owner review\s+signature")
+        self.assertIn("signed admission", readme)
         self.assertNotRegex(readme, r"verifies the independent human\s+review")
         self.assertIn("Promotion independently revalidates this package", workflow)
+
+    def test_evaluation_publication_requires_offline_admission_evidence(self):
+        workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(encoding="utf-8")
+        contract = RELEASE_CONTRACT.read_text(encoding="utf-8")
+        ownership_start = workflow.index("  acquire_candidate_ownership:\n")
+        prepare_start = workflow.index("  prepare:\n", ownership_start)
+        ownership = workflow[ownership_start:prepare_start]
+
+        for name in (
+            "assistant-eval-admission.json",
+            "assistant-eval-admission.sig",
+        ):
+            self.assertIn(name, workflow)
+            self.assertIn(name, contract)
+            self.assertIn(name, ownership)
+        binding = ownership.index(".admission_sha256")
+        self.assertIn(".admission_run_identity", ownership)
+        self.assertIn('sha256sum "$acquired_admission"', ownership)
+        self.assertIn("printf '%s' \"$admission_nonce\" | sha256sum", ownership)
+        ownership_boundary = ownership.index("candidate_owned=false")
+        self.assertLess(
+            ownership.index("assistant-eval-admission.sig 514"), ownership_boundary
+        )
+        self.assertLess(binding, ownership_boundary)
+        self.assertIn(
+            "Signature verification is deliberately deferred to exact evaluated Lex",
+            ownership,
+        )
+        self.assertNotIn("assistant-eval verify-report", ownership)
+        self.assertIn("--admission evidence/assistant-eval-admission.json", workflow)
+        self.assertIn("--admission-signature evidence/assistant-eval-admission.sig", workflow)
+        self.assertIn("report_admission_sha=$(jq -er", workflow)
+        self.assertIn('= "$report_admission_sha" ]', workflow)
+        self.assertIn("--file assistant-eval-admission.json", workflow)
+        self.assertIn("--file assistant-eval-admission.sig", workflow)
+        self.assertIn('--source "admission_sha256=$ADMISSION_SHA"', workflow)
+        self.assertIn(
+            '--source "admission_run_identity=$ADMISSION_RUN_IDENTITY"', workflow
+        )
+        self.assertLess(
+            workflow.index("assistant-eval verify-report"),
+            workflow.index("artifact manifest --root evidence"),
+        )
 
     def test_evaluation_release_json_contract_fails_closed(self):
         contract = RELEASE_CONTRACT.read_text(encoding="utf-8")
@@ -1527,6 +1577,8 @@ validate_bootstrap_abandonment_prestate \
                 "assistant-cases-v3.json",
                 "assistant-cases-v3.review.json",
                 "assistant-cases-v3.review.sig",
+                "assistant-eval-admission.json",
+                "assistant-eval-admission.sig",
                 "assistant-browser-evidence.json",
                 "assistant-eval.manifest.json",
                 "assistant-eval.manifest.sig",
@@ -1547,6 +1599,8 @@ validate_bootstrap_abandonment_prestate \
         return {
             "schema": "lex-assistant-eval-report/3",
             "cases_sha256": "c" * 64,
+            "admission_run_identity": "d" * 16,
+            "admission_sha256": "e" * 64,
             "identity": {
                 "target": {
                     "code_commit": "a" * 40,
