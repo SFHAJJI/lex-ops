@@ -1,23 +1,23 @@
 {
   "schema": "lex-index-build-queue/2",
   "mode": "prebuilt",
-  "build_code_commit": "27f0e02cb0da8e0fdf9f8322d3eef3b3ae09c776",
-  "articles_commit": "ac8851147534b9addfa2231c4364cbd785065841",
-  "articles_generation_sha256": "6a2fb2647dea3ba0b3391e40a0612073c626ef0966bd816cdb8b99b57135c8da",
+  "build_code_commit": "65ddb8a9425d9187e342d3b185d781874b591b8d",
+  "articles_commit": "de561a2986ab193998581623378643b1d089a142",
+  "articles_generation_sha256": "493751098e75bdd3d7e5b62e2c9e81578f84a9c5dcec9d9cb0343aa079d8e229",
   "entries": [
     {
-      "collection": "lu-legilux",
-      "corpus_repo": "SFHAJJI/lex-corpus-lu-legilux",
-      "corpus_commit": "c087f9153a8cde5429965ffa897db001f3acdf09",
-      "corpus_manifest_sha256": "9b723d5562e7110d525ae8667910cd8b463b8a993b12c7a3f38604baa8cf76fc",
-      "ingester_code_commit": "0a7ad53c36176c2d52473e0182e86e5c918f60b5",
-      "deriver_code_commit": "27f0e02cb0da8e0fdf9f8322d3eef3b3ae09c776",
+      "collection": "eu-eurlex",
+      "corpus_repo": "SFHAJJI/lex-corpus-eu-eurlex",
+      "corpus_commit": "18522183f34eec5d027125ef4e7cee4820d25954",
+      "corpus_manifest_sha256": "01e60691be63fb94a9f339577fd371f53d73ccfae42cb9c1bb378cd192c57f81",
+      "ingester_code_commit": "65ddb8a9425d9187e342d3b185d781874b591b8d",
+      "deriver_code_commit": "65ddb8a9425d9187e342d3b185d781874b591b8d",
       "deriver_tree_id": "69f0bef039a569f897e7ea81cefa6850d65606db",
-      "profiles_sha256": "74534202088578b97f7b1e14e8cfa11700f29316cffdcd5ee304c051c764b12e",
-      "source_configuration_kind": "code_only",
-      "source_configuration_sha256": null
+      "profiles_sha256": "dc2648dad7205e41eef345172b8413322834a36850a80f266e1632f466660f65",
+      "source_configuration_kind": "engineering_scope",
+      "source_configuration_sha256": "04a490e489c40568ccee5a17de3f6d2988e2ba153d3a98ad72aa529f45e08d72"
     }
   ],
-  "ticket_id": "f2d4c2ed2b673f9db4abda429ba1451c3be80a4344ab589c86b1a7f29d39819c",
-  "generated_at": "2026-08-15T08:49:53Z"
+  "ticket_id": "6ac8a7ebec53262dc78ced45ebd0c051dd0e38c1bd91ee20de431dad33e655e9",
+  "generated_at": "2026-08-16T02:43:31Z"
 }

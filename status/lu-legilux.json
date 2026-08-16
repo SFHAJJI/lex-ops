@@ -1,6 +1,6 @@
 {
   "publisher": "lu-legilux",
-  "run": "2026-08-15T08:49:53Z",
-  "outcome": "ran_no_change",
-  "works": 1402
+  "run": "2026-08-16T02:43:31Z",
+  "outcome": "failed_ingest",
+  "works": null
 }
