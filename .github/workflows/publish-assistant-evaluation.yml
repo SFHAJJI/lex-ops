@@ -575,12 +575,29 @@ jobs:
             az_retry az containerapp revision activate -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
               --revision "$CANDIDATE_REVISION" >/dev/null
           fi
-          for attempt in {1..20}; do
-            running=$(az_retry az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
-              --revision "$CANDIDATE_REVISION" --query properties.runningState -o tsv)
-              { [ "$running" = "Running" ] || [ "$running" = "RunningAtMaxScale" ]; } && break
-            [ "$attempt" = "20" ] \
-              && { echo "::error::candidate revision did not become ready"; exit 1; }
+          # runningState is not proof that the revision answers on its own hostname, and it is not
+          # proof that ARM has reconciled trafficWeight back to an integer 0. Both feed the target
+          # evidence digest that verify-report compares, so reading either one early produces a
+          # digest for a revision state that never existed and the publication fails with a
+          # mismatch that looks like wrong evidence rather than an early read. Require the three
+          # facts the digest actually depends on: it is running, it is not routing, and it serves
+          # its own artifact manifest set rather than falling through to the traffic-bearing one.
+          for attempt in {1..40}; do
+            candidate_status=$(az_retry az containerapp revision show \
+              -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" --revision "$CANDIDATE_REVISION" \
+              --query '{running:properties.runningState,traffic:properties.trafficWeight}' -o json)
+            running=$(printf '%s' "$candidate_status" | jq -r '.running // ""')
+            traffic=$(printf '%s' "$candidate_status" | jq -r '.traffic // "absent"')
+            if { [ "$running" = "Running" ] || [ "$running" = "RunningAtMaxScale" ]; } \
+              && [ "$traffic" = "0" ] \
+              && curl --fail --silent --show-error --connect-timeout 5 --max-time 20 \
+                  "https://$candidate_fqdn/attestation.json" \
+                | jq -e --arg set "$TARGET_MANIFEST_SET" \
+                  'tostring | test($set)' >/dev/null 2>&1; then
+              break
+            fi
+            [ "$attempt" = "40" ] \
+              && { echo "::error::candidate revision did not become ready at zero traffic on its own hostname (running=$running traffic=$traffic)"; exit 1; }
             sleep 3
           done
 
