@@ -4,3 +4,8 @@ corpus-*/
 lex/
 __pycache__/
 *.py[cod]
+
+# Signed evaluation artifacts. Their bytes are what a signature covers, so they must never pass
+# through git's line-ending normalisation: a stash and pop of this directory once turned a valid
+# owner signature into an invalid one by rewriting a single trailing newline.
+eval/
