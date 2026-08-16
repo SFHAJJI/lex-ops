@@ -127,6 +127,32 @@ jobs:
           public_retry=false
           [ "$release_state" = public ] && public_retry=true
 
+          download_acquisition_asset() {
+            local name="$1" maximum_size="$2" output="$3"
+            local asset asset_id asset_digest expected_sha expected_size actual_sha actual_size
+            asset=$(jq -ec --arg name "$name" --argjson maximum "$maximum_size" '
+              [.assets[] | select(.name == $name)]
+              | select(length == 1) | .[0]
+              | select((.id | type) == "number" and (.id % 1) == 0 and .id > 0
+                  and (.digest | type) == "string"
+                  and (.digest | test("^sha256:[0-9a-f]{64}$"))
+                  and (.size | type) == "number" and (.size % 1) == 0
+                  and .size > 0 and .size <= $maximum and .state == "uploaded")
+            ' "$acquired_release") || return 1
+            asset_id=$(jq -r '.id' <<< "$asset") || return 1
+            asset_digest=$(jq -r '.digest' <<< "$asset") || return 1
+            expected_sha=${asset_digest#sha256:}
+            expected_size=$(jq -r '.size' <<< "$asset") || return 1
+            gh api --method GET -H 'Accept: application/octet-stream' \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$EVALUATION_REPOSITORY/releases/assets/$asset_id" \
+              > "$output" || return 1
+            actual_sha=$(sha256sum "$output" | cut -d' ' -f1) || return 1
+            actual_size=$(wc -c < "$output" | tr -d ' ') || return 1
+            [ "$actual_sha" = "$expected_sha" ] \
+              && [ "$actual_size" = "$expected_size" ]
+          }
+
           report_asset=$(jq -ec '
             [.assets[] | select(.name == "assistant-eval-report.json")]
             | select(length == 1) | .[0]
@@ -151,15 +177,46 @@ jobs:
           [ "$actual_report_sha" = "$expected_report_sha" ] \
             && [ "$actual_report_size" = "$expected_report_size" ] \
             || { echo "::error::candidate acquisition report bytes changed"; exit 2; }
-          report_code_commit=$(jq -er --arg candidate "$CANDIDATE_REVISION" '
+          acquired_admission="$RUNNER_TEMP/assistant-eval-admission.acquired.json"
+          acquired_admission_signature="$RUNNER_TEMP/assistant-eval-admission.acquired.sig"
+          download_acquisition_asset \
+            assistant-eval-admission.json 32768 "$acquired_admission" \
+            || { echo "::error::candidate acquisition admission asset is not exact"; exit 2; }
+          download_acquisition_asset \
+            assistant-eval-admission.sig 514 "$acquired_admission_signature" \
+            || { echo "::error::candidate acquisition admission signature is not exact"; exit 2; }
+          # Acquisition establishes exact asset bytes and report binding only.
+          # Signature verification is deliberately deferred to exact evaluated Lex after bounded
+          # zero-traffic activation and before browser evidence, signing, or publication.
+          report_binding=$(jq -er --arg candidate "$CANDIDATE_REVISION" '
             select(.schema == "lex-assistant-eval-report/3"
               and .activation_gate_passed == true and .gate_failures == []
               and .identity.target.revision_name == $candidate
               and (.identity.target.code_commit | type) == "string"
-              and (.identity.target.code_commit | test("^[0-9a-f]{40}$")))
-            | .identity.target.code_commit
+              and (.identity.target.code_commit | test("^[0-9a-f]{40}$"))
+              and (.admission_sha256 | type) == "string"
+              and (.admission_sha256 | test("^[0-9a-f]{64}$"))
+              and (.admission_run_identity | type) == "string"
+              and (.admission_run_identity | test("^[0-9a-f]{16}$")))
+            | [.identity.target.code_commit, .admission_sha256,
+                .admission_run_identity] | @tsv
           ' "$acquired_report") \
             || { echo "::error::candidate acquisition report identity is not exact"; exit 2; }
+          IFS=$'\t' read -r report_code_commit report_admission_sha \
+            report_admission_run_identity <<< "$report_binding"
+          actual_admission_sha=$(sha256sum "$acquired_admission" | cut -d' ' -f1)
+          [ "$actual_admission_sha" = "$report_admission_sha" ] \
+            || { echo "::error::candidate acquisition report does not bind admission bytes"; exit 2; }
+          admission_nonce=$(jq -er '
+            select(.schema == "lex-assistant-eval-admission/1")
+            | .nonce | select(type == "string"
+                and test("^[A-Za-z0-9_-]{43}$"))
+          ' "$acquired_admission") \
+            || { echo "::error::candidate acquisition admission identity is malformed"; exit 2; }
+          admission_run_identity=$(printf '%s' "$admission_nonce" | sha256sum \
+            | cut -c1-16)
+          [ "$admission_run_identity" = "$report_admission_run_identity" ] \
+            || { echo "::error::candidate acquisition report does not bind admission run"; exit 2; }
           bound_release="assistant-eval-${report_code_commit:0:12}-${actual_report_sha:0:12}"
           [ "$bound_release" = "$EVALUATION_RELEASE" ] \
             || { echo "::error::candidate acquisition release does not bind report bytes"; exit 2; }
@@ -273,6 +330,8 @@ jobs:
               "assistant-cases-v3.json",
               "assistant-cases-v3.review.json",
               "assistant-cases-v3.review.sig",
+              "assistant-eval-admission.json",
+              "assistant-eval-admission.sig",
               "assistant-browser-evidence.json",
               "assistant-eval.manifest.json",
               "assistant-eval.manifest.sig"
@@ -285,7 +344,9 @@ jobs:
             "assistant-eval-report.json",
             "assistant-cases-v3.json",
             "assistant-cases-v3.review.json",
-            "assistant-cases-v3.review.sig"
+            "assistant-cases-v3.review.sig",
+            "assistant-eval-admission.json",
+            "assistant-eval-admission.sig"
           ]')
           gh release verify --help >/dev/null
           gh release verify-asset --help >/dev/null
@@ -354,6 +415,13 @@ jobs:
           python3 scripts/assistant_evaluation_identity.py \
             evidence/assistant-eval-report.json \
             "$CANDIDATE_REVISION" "$EVALUATION_RELEASE" "$GITHUB_ENV"
+          report_admission_sha=$(jq -er '
+            .admission_sha256
+            | select(type == "string" and test("^[0-9a-f]{64}$"))
+          ' evidence/assistant-eval-report.json)
+          [ "$(sha256sum evidence/assistant-eval-admission.json | cut -d' ' -f1)" \
+              = "$report_admission_sha" ] \
+            || { echo "::error::report does not bind the downloaded admission"; exit 2; }
           ensure_release_tag "$release_state" "$entry_tag" \
             || { echo "::error::release tag is not a direct exact workflow commit"; exit 1; }
 
@@ -518,6 +586,8 @@ jobs:
             --cases evidence/assistant-cases-v3.json \
             --review-attestation evidence/assistant-cases-v3.review.json \
             --review-signature evidence/assistant-cases-v3.review.sig \
+            --admission evidence/assistant-eval-admission.json \
+            --admission-signature evidence/assistant-eval-admission.sig \
             --base-url "https://$candidate_fqdn" \
             --candidate-container-app-resource-id "$app_id" \
             --candidate-revision "$CANDIDATE_REVISION"
@@ -537,10 +607,14 @@ jobs:
             --file assistant-cases-v3.json \
             --file assistant-cases-v3.review.json \
             --file assistant-cases-v3.review.sig \
+            --file assistant-eval-admission.json \
+            --file assistant-eval-admission.sig \
             --file assistant-browser-evidence.json \
             --manifest evidence/assistant-eval.manifest.json \
             --key-id "$ARTIFACT_KEY_ID" --code-commit "$CODE_COMMIT" \
             --source "artifact_manifest_set=$TARGET_MANIFEST_SET" \
+            --source "admission_run_identity=$ADMISSION_RUN_IDENTITY" \
+            --source "admission_sha256=$ADMISSION_SHA" \
             --source "browser_evidence_sha256=$browser_evidence_sha" \
             --source "candidate_evidence_sha256=$TARGET_EVIDENCE_SHA" \
             --source "candidate_revision=$CANDIDATE_REVISION" \
@@ -762,6 +836,8 @@ jobs:
             evidence/assistant-cases-v3.json
             evidence/assistant-cases-v3.review.json
             evidence/assistant-cases-v3.review.sig
+            evidence/assistant-eval-admission.json
+            evidence/assistant-eval-admission.sig
             evidence/assistant-browser-evidence.json
             evidence/assistant-eval.manifest.json
             evidence/assistant-eval.manifest.sig

@@ -44,6 +44,8 @@ write_expected_release_names() {
       "assistant-cases-v3.json",
       "assistant-cases-v3.review.json",
       "assistant-cases-v3.review.sig",
+      "assistant-eval-admission.json",
+      "assistant-eval-admission.sig",
       "assistant-browser-evidence.json",
       "assistant-eval.manifest.json",
       "assistant-eval.manifest.sig"

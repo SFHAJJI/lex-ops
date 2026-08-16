@@ -11,6 +11,7 @@ CODE_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
 REVISION = re.compile(r"^ca-lex-web--[a-z0-9-]+$")
 RELEASE = re.compile(r"^assistant-eval-[0-9a-f]{12}-[0-9a-f]{12}$")
+RUN_IDENTITY = re.compile(r"^[0-9a-f]{16}$")
 REPORT_SCHEMA = "lex-assistant-eval-report/3"
 
 
@@ -55,6 +56,9 @@ def validate(report_path, expected_revision, expected_release):
     evidence_sha = matching_string(
         report, DIGEST, "identity", "target", "evidence_sha256")
     cases_sha = matching_string(report, DIGEST, "cases_sha256")
+    admission_sha = matching_string(report, DIGEST, "admission_sha256")
+    admission_run_identity = matching_string(
+        report, RUN_IDENTITY, "admission_run_identity")
     if nested(report, "schema") != REPORT_SCHEMA:
         raise ValueError("assistant evaluation report schema is unsupported")
     if nested(report, "activation_gate_passed") is not True:
@@ -74,6 +78,8 @@ def validate(report_path, expected_revision, expected_release):
         "TARGET_MANIFEST_SET": manifest_set,
         "TARGET_EVIDENCE_SHA": evidence_sha,
         "CASES_SHA": cases_sha,
+        "ADMISSION_RUN_IDENTITY": admission_run_identity,
+        "ADMISSION_SHA": admission_sha,
         "REPORT_SCHEMA": REPORT_SCHEMA,
     }, report_sha
 
