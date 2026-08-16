@@ -11,6 +11,11 @@ on:
         description: Exact zero-traffic Container Apps revision evaluated
         required: true
         type: string
+      verifier_code_commit:
+        description: Optional later Lex commit on main used to verify existing evidence, must descend from the evaluated commit
+        required: false
+        default: ""
+        type: string
       bootstrap_rollback_revision:
         description: Optional first-release equivalent fallback created before the candidate
         required: false
@@ -429,13 +434,34 @@ jobs:
           ensure_release_tag "$release_state" "$entry_tag" \
             || { echo "::error::release tag is not a direct exact workflow commit"; exit 1; }
 
-      - name: Check out the exact evaluated Lex commit
+      - name: Check out the Lex commit that verifies this evidence
         shell: bash
+        env:
+          VERIFIER_CODE_COMMIT: ${{ inputs.verifier_code_commit }}
         run: |
           set -euo pipefail
+          # The evidence is immutable and signature-protected; the verifier is only the code that
+          # reads it. Pinning verification to the evaluated commit meant a bug in the checking logic
+          # could never be corrected for evidence that already existed: fixing it required a redeploy
+          # and a fresh 56-call evaluation that proved nothing new about the product.
+          #
+          # Verification may therefore move forward and never backward. An override must be on Lex
+          # main and must be a descendant of the evaluated commit, so it can only ever contain more
+          # of the history that produced the evidence, never less. The commit actually used is
+          # recorded below and printed, so the relaxation is visible rather than silent.
           git clone --filter=blob:none https://github.com/SFHAJJI/lex.git lex
-          git -C lex checkout --detach "$CODE_COMMIT"
-          test "$(git -C lex rev-parse HEAD)" = "$CODE_COMMIT"
+          verifier="$CODE_COMMIT"
+          if [ -n "${VERIFIER_CODE_COMMIT:-}" ]; then
+            [[ "$VERIFIER_CODE_COMMIT" =~ ^[0-9a-f]{40}$ ]]               || { echo "::error::verifier_code_commit must be a full commit sha"; exit 2; }
+            git -C lex merge-base --is-ancestor "$VERIFIER_CODE_COMMIT"               refs/remotes/origin/main               || { echo "::error::verifier commit is not on Lex main"; exit 2; }
+            git -C lex merge-base --is-ancestor "$CODE_COMMIT" "$VERIFIER_CODE_COMMIT"               || { echo "::error::verifier commit must descend from the evaluated commit"; exit 2; }
+            verifier="$VERIFIER_CODE_COMMIT"
+            echo "::warning::verifying evaluated commit $CODE_COMMIT with later verifier $verifier"
+          fi
+          git -C lex checkout --detach "$verifier"
+          test "$(git -C lex rev-parse HEAD)" = "$verifier"
+          echo "VERIFIER_COMMIT=$verifier" >> "$GITHUB_ENV"
+          echo "evaluated code $CODE_COMMIT; verified by $verifier"
 
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
