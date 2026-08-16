@@ -452,15 +452,19 @@ jobs:
           git clone --filter=blob:none https://github.com/SFHAJJI/lex.git lex
           verifier="$CODE_COMMIT"
           if [ -n "${VERIFIER_CODE_COMMIT:-}" ]; then
-            [[ "$VERIFIER_CODE_COMMIT" =~ ^[0-9a-f]{40}$ ]]               || { echo "::error::verifier_code_commit must be a full commit sha"; exit 2; }
-            git -C lex merge-base --is-ancestor "$VERIFIER_CODE_COMMIT"               refs/remotes/origin/main               || { echo "::error::verifier commit is not on Lex main"; exit 2; }
-            git -C lex merge-base --is-ancestor "$CODE_COMMIT" "$VERIFIER_CODE_COMMIT"               || { echo "::error::verifier commit must descend from the evaluated commit"; exit 2; }
-            verifier="$VERIFIER_CODE_COMMIT"
+            # Accepted in either case and normalised, because a sha copied from a UI is often
+            # uppercase, and existence is checked explicitly so an unknown commit fails saying so
+            # rather than failing later inside an ancestry test.
+            candidate=$(printf '%s' "$VERIFIER_CODE_COMMIT" | tr 'A-F' 'a-f')
+            [[ "$candidate" =~ ^[0-9a-f]{40}$ ]]               || { echo "::error::verifier_code_commit must be a full 40 character commit sha"; exit 2; }
+            git -C lex cat-file -e "$candidate^{commit}" 2>/dev/null               || { echo "::error::verifier commit $candidate is not a commit in Lex"; exit 2; }
+            git -C lex merge-base --is-ancestor "$candidate" refs/remotes/origin/main               || { echo "::error::verifier commit is not on Lex main"; exit 2; }
+            git -C lex merge-base --is-ancestor "$CODE_COMMIT" "$candidate"               || { echo "::error::verifier commit must descend from the evaluated commit"; exit 2; }
+            verifier="$candidate"
             echo "::warning::verifying evaluated commit $CODE_COMMIT with later verifier $verifier"
           fi
           git -C lex checkout --detach "$verifier"
           test "$(git -C lex rev-parse HEAD)" = "$verifier"
-          echo "VERIFIER_COMMIT=$verifier" >> "$GITHUB_ENV"
           echo "evaluated code $CODE_COMMIT; verified by $verifier"
 
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
