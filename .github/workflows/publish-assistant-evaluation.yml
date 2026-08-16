@@ -256,8 +256,9 @@ jobs:
     if: github.ref == 'refs/heads/main'
     environment: production
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 50
     outputs:
+      admission_expires_at: ${{ steps.stage.outputs.admission_expires_at }}
       bootstrap_mode: ${{ steps.resolve.outputs.bootstrap_mode }}
       bootstrap_routes_sha256: ${{ steps.stage.outputs.bootstrap_routes_sha256 }}
       cases_sha256: ${{ steps.identity.outputs.cases_sha256 }}
@@ -591,6 +592,12 @@ jobs:
             --base-url "https://$candidate_fqdn" \
             --candidate-container-app-resource-id "$app_id" \
             --candidate-revision "$CANDIDATE_REVISION"
+          admission_expires_at=$(jq -er \
+            '.expires_at | select(type == "string")' \
+            evidence/assistant-eval-admission.json) \
+            && validate_utc_expiry "$admission_expires_at" \
+            || { echo "::error::verified admission expiry is malformed"; exit 1; }
+          echo "admission_expires_at=$admission_expires_at" >> "$GITHUB_OUTPUT"
 
           export LEX_BROWSER_BASE_URL="https://$candidate_fqdn"
           export LEX_BROWSER_EVIDENCE_OUT="$GITHUB_WORKSPACE/evidence/assistant-browser-evidence.json"
@@ -885,6 +892,8 @@ jobs:
               || { echo "::error::bootstrap route inventory digest is invalid"; exit 1; }
             echo "bootstrap_routes_sha256=$bootstrap_routes_sha256" >> "$GITHUB_OUTPUT"
           fi
+          wait_for_utc_expiry "$admission_expires_at" 1200 \
+            || { echo "::error::verified admission did not expire within the publication window"; exit 1; }
           release_names="$RUNNER_TEMP/evaluation-release-names.json"
           printf '%s\n' "${release_assets[@]##*/}" \
             | jq -Rsc 'split("\n") | map(select(length > 0)) | sort' > "$release_names"
@@ -966,6 +975,7 @@ jobs:
       CODE_COMMIT: ${{ needs.prepare.outputs.code_commit }}
       CANDIDATE_REVISION: ${{ inputs.candidate_revision }}
       BOOTSTRAP_MODE: ${{ needs.prepare.outputs.bootstrap_mode }}
+      ADMISSION_EXPIRES_AT: ${{ needs.prepare.outputs.admission_expires_at }}
       EXPECTED_BOOTSTRAP_ROUTES_SHA256: ${{ needs.prepare.outputs.bootstrap_routes_sha256 }}
       BOOTSTRAP_ROLLBACK_REVISION: ${{ inputs.bootstrap_rollback_revision }}
       RESOURCE_GROUP: rg-platform
@@ -1067,6 +1077,8 @@ jobs:
             | sha256sum | cut -d' ' -f1)
           [ "$release_inventory_sha256" = "$EXPECTED_RELEASE_INVENTORY_SHA256" ] \
             || { echo "::error::draft release inventory differs from staged evidence"; exit 1; }
+          wait_for_utc_expiry "$ADMISSION_EXPIRES_AT" 0 \
+            || { echo "::error::verified admission is not expired at publication"; exit 1; }
           if [ "$BOOTSTRAP_MODE" = true ]; then
             # From the next API command onward success is ambiguous under cancellation. Bootstrap
             # C must remain active so an already-public package cannot lose its promotion target.

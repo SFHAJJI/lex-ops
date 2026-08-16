@@ -83,6 +83,40 @@ canonicalize_revision_routes() {
   ' "$input" > "$output"
 }
 
+validate_utc_expiry() {
+  local expiry="${1-}"
+  [[ "$expiry" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,7})?(Z|\+00:00)$ ]] \
+    && date --utc --date="$expiry" +%s >/dev/null 2>&1
+}
+
+wait_for_utc_expiry() {
+  local expiry="${1-}" maximum_wait_seconds="${2-}"
+  local expiry_epoch now_epoch wait_seconds
+  validate_utc_expiry "$expiry" \
+    && [[ "$maximum_wait_seconds" =~ ^(0|[1-9][0-9]{0,3})$ ]] \
+    && (( maximum_wait_seconds <= 1200 )) \
+    || return 1
+  expiry_epoch=$(date --utc --date="$expiry" +%s) \
+    && [[ "$expiry_epoch" =~ ^[0-9]+$ ]] \
+    || return 1
+  # GNU date truncates fractional instants; round expiry up so publication
+  # cannot occur during the final fractional second of a signed capability.
+  if [[ "$expiry" == *.* ]]; then
+    expiry_epoch=$((expiry_epoch + 1))
+  fi
+  now_epoch=$(date --utc +%s) \
+    && [[ "$now_epoch" =~ ^[0-9]+$ ]] \
+    || return 1
+  wait_seconds=$((expiry_epoch - now_epoch))
+  (( wait_seconds <= maximum_wait_seconds )) || return 1
+  if (( wait_seconds > 0 )); then
+    sleep "$wait_seconds" || return 1
+  fi
+  now_epoch=$(date --utc +%s) \
+    && [[ "$now_epoch" =~ ^[0-9]+$ ]] \
+    && (( now_epoch >= expiry_epoch ))
+}
+
 deactivate_zero_traffic_candidate() {
   local resource_group="$1" container_app="$2" candidate_revision="$3"
   local attempt state active

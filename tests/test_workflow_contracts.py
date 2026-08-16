@@ -1005,6 +1005,135 @@ size_file() { printf '%s' "$POINTER_SIZE"; }
             workflow.index("artifact manifest --root evidence"),
         )
 
+    def test_evaluation_publication_waits_for_verified_admission_expiry(self):
+        workflow = (WORKFLOWS / "publish-assistant-evaluation.yml").read_text(encoding="utf-8")
+        prepare_start = workflow.index("  prepare:\n")
+        publish_start = workflow.index("  publish:\n", prepare_start)
+        prepare = workflow[prepare_start:publish_start]
+        publish = workflow[publish_start:workflow.index("  verify:\n", publish_start)]
+
+        self.assertIn(
+            "admission_expires_at: ${{ steps.stage.outputs.admission_expires_at }}",
+            prepare,
+        )
+        verified = prepare.index("assistant-eval verify-report")
+        expiry = prepare.index(
+            "admission_expires_at=$(jq -er", verified
+        )
+        exported = prepare.index(
+            'echo "admission_expires_at=$admission_expires_at" >> "$GITHUB_OUTPUT"',
+            expiry,
+        )
+        self.assertLess(verified, expiry)
+        self.assertLess(expiry, exported)
+        self.assertIn(
+            "ADMISSION_EXPIRES_AT: ${{ needs.prepare.outputs.admission_expires_at }}",
+            publish,
+        )
+        first_gate = prepare.index(
+            'wait_for_utc_expiry "$admission_expires_at" 1200', exported
+        )
+        final_prepare_check = prepare.index("staged draft release is not exact")
+        self.assertLess(first_gate, final_prepare_check)
+        self.assertNotIn(
+            'wait_for_utc_expiry "$ADMISSION_EXPIRES_AT" 1200', publish
+        )
+        final_state_check = publish.index(
+            "draft release inventory differs from staged evidence"
+        )
+        final_gate = publish.index(
+            'wait_for_utc_expiry "$ADMISSION_EXPIRES_AT" 0'
+        )
+        public_patch = publish.index("gh api --method PATCH")
+        self.assertLess(final_state_check, final_gate)
+        self.assertLess(final_gate, public_patch)
+        self.assertNotIn("assistant-eval-admission.json\"", publish)
+        self.assertNotIn("admission_nonce", publish)
+
+    def test_admission_expiry_gate_is_bounded_and_fails_closed(self):
+        contract = RELEASE_CONTRACT.read_text(encoding="utf-8")
+        candidate = (
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+            / "Git"
+            / "bin"
+            / "bash.exe"
+        )
+        bash = str(candidate) if candidate.is_file() else shutil.which("bash")
+        self.assertIsNotNone(bash, "Git Bash is required for release contract tests")
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            directory = Path(temporary)
+            contract_path = directory / "release-contract.sh"
+            contract_path.write_text(contract, encoding="utf-8", newline="\n")
+            sleep_log = directory / "sleep.log"
+
+            def run(expiry, expiry_epoch, now_before, now_after, maximum_wait):
+                sleep_log.unlink(missing_ok=True)
+                return subprocess.run(
+                    [
+                        bash,
+                        "-c",
+                        r'''set -euo pipefail
+. "$1"
+date() {
+  if [ "$1" = --utc ] && [ "${2-}" = "--date=$TEST_EXPIRY" ] && [ "${3-}" = +%s ]; then
+    printf '%s\n' "$TEST_EXPIRY_EPOCH"
+  elif [ "$1" = --utc ] && [ "${2-}" = +%s ]; then
+    if [ -s "$SLEEP_LOG" ]; then
+      printf '%s\n' "$TEST_NOW_AFTER"
+    else
+      printf '%s\n' "$TEST_NOW_BEFORE"
+    fi
+  else
+    return 97
+  fi
+}
+sleep() { printf '%s\n' "$1" > "$SLEEP_LOG"; }
+wait_for_utc_expiry "$TEST_EXPIRY" "$TEST_MAXIMUM_WAIT"
+''',
+                        "_",
+                        contract_path.as_posix(),
+                    ],
+                    cwd=ROOT,
+                    env={
+                        **os.environ,
+                        "TEST_EXPIRY": expiry,
+                        "TEST_EXPIRY_EPOCH": str(expiry_epoch),
+                        "TEST_NOW_BEFORE": str(now_before),
+                        "TEST_NOW_AFTER": str(now_after),
+                        "TEST_MAXIMUM_WAIT": str(maximum_wait),
+                        "SLEEP_LOG": sleep_log.as_posix(),
+                    },
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+            waited = run("2026-08-16T02:20:00.5000000Z", 120, 100, 121, 21)
+            self.assertEqual(0, waited.returncode, waited.stderr)
+            self.assertEqual("21\n", sleep_log.read_text(encoding="utf-8"))
+
+            for invalid in (
+                "not-an-instant",
+                "2026-08-16T02:20:00+01:00",
+                "2026-08-16T02:20:00",
+            ):
+                with self.subTest(expiry=invalid):
+                    self.assertNotEqual(0, run(invalid, 120, 100, 121, 21).returncode)
+                    self.assertFalse(sleep_log.exists())
+
+            too_far = run("2026-08-16T02:20:40Z", 140, 100, 140, 20)
+            self.assertNotEqual(0, too_far.returncode)
+            self.assertFalse(sleep_log.exists())
+
+            unsafe_bound = run("2026-08-16T02:20:01Z", 101, 100, 101, 1201)
+            self.assertNotEqual(0, unsafe_bound.returncode)
+            self.assertFalse(sleep_log.exists())
+
+            expired = run("2026-08-16T02:19:59Z", 99, 100, 100, 0)
+            self.assertEqual(0, expired.returncode, expired.stderr)
+            self.assertFalse(sleep_log.exists())
+
     def test_evaluation_release_json_contract_fails_closed(self):
         contract = RELEASE_CONTRACT.read_text(encoding="utf-8")
         candidate = (
