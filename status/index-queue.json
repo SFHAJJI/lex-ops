@@ -2,13 +2,13 @@
   "schema": "lex-index-build-queue/2",
   "mode": "prebuilt",
   "build_code_commit": "03758c6843b1d19abbbd85bf89c76bc639ccf8b0",
-  "articles_commit": "ce5100fe59267e628889584d6b45647d54693a1c",
-  "articles_generation_sha256": "81c10c605717c58ad434a4722220531eb77ff614755960e54b8a647aac876509",
+  "articles_commit": "ddc477b1a6adea1fc0ae3b5dbfa7947d47a49f40",
+  "articles_generation_sha256": "871d36c03737fb6ab7b3cbf684bf777140520ab0a4d1a4ac56cb79028e23ae50",
   "entries": [
     {
       "collection": "eu-eurlex",
       "corpus_repo": "SFHAJJI/lex-corpus-eu-eurlex",
-      "corpus_commit": "6ed8104d3ee8219432fba707390bdddff9d2c5ca",
+      "corpus_commit": "3cd164aae21d4edea0be3b3f5e175998420ecc57",
       "corpus_manifest_sha256": "87ae2c9b430349dfd07e465bdc2e63e099ec64292c0c682d5ea0a4fd96a8d8f4",
       "ingester_code_commit": "03758c6843b1d19abbbd85bf89c76bc639ccf8b0",
       "deriver_code_commit": "03758c6843b1d19abbbd85bf89c76bc639ccf8b0",
@@ -18,6 +18,6 @@
       "source_configuration_sha256": "04a490e489c40568ccee5a17de3f6d2988e2ba153d3a98ad72aa529f45e08d72"
     }
   ],
-  "ticket_id": "9dbed612d6867220a2d4d6ab397a3223bdad9d23ab7cb3ca7a526421762f07e1",
-  "generated_at": "2026-08-17T02:43:16Z"
+  "ticket_id": "fd387b12033eae45e1d3c9aba7efefde7e36f472fcb09f798a4448aafdb01348",
+  "generated_at": "2026-08-18T03:10:33Z"
 }
