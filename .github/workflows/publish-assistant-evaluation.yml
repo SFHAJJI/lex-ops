@@ -188,7 +188,7 @@ jobs:
           acquired_admission="$RUNNER_TEMP/assistant-eval-admission.acquired.json"
           acquired_admission_signature="$RUNNER_TEMP/assistant-eval-admission.acquired.sig"
           download_acquisition_asset \
-            assistant-eval-admission.json 32768 "$acquired_admission" \
+            assistant-eval-admission.json 65536 "$acquired_admission" \
             || { echo "::error::candidate acquisition admission asset is not exact"; exit 2; }
           download_acquisition_asset \
             assistant-eval-admission.sig 514 "$acquired_admission_signature" \
