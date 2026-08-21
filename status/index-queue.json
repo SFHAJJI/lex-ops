@@ -1,23 +1,23 @@
 {
   "schema": "lex-index-build-queue/2",
   "mode": "prebuilt",
-  "build_code_commit": "563c3fd711a7beb8040a08a8a8bd436e6982567b",
-  "articles_commit": "8ee619733205083abeec78cd24216c0c06ad97df",
-  "articles_generation_sha256": "3f6faa54271f04f423b9802f1d85d27c1668d1833163a3a48453579cbb16d57a",
+  "build_code_commit": "addc13b07ea5ce83c2ab1c4c7b5f5d8b4bc43c9f",
+  "articles_commit": "59f751cd57e63d6bed8a710b39b9559ad7bde09a",
+  "articles_generation_sha256": "019e9cf71a026b377af6f61fed052912927ac3e42410c81fb84814c62cb4d7cd",
   "entries": [
     {
       "collection": "eu-eurlex",
       "corpus_repo": "SFHAJJI/lex-corpus-eu-eurlex",
-      "corpus_commit": "6bf67cd380713774788270df057457739be76f85",
-      "corpus_manifest_sha256": "f621ef496104f53c8e91cb00d1562b34614c3e03eb681b2f6a65e748e871ef65",
-      "ingester_code_commit": "563c3fd711a7beb8040a08a8a8bd436e6982567b",
-      "deriver_code_commit": "563c3fd711a7beb8040a08a8a8bd436e6982567b",
+      "corpus_commit": "fa8ea98840c6d13f392a9b7de676807011d192e2",
+      "corpus_manifest_sha256": "b1f10099486655348cda3757a8b5b431d5637c4872d81f56fb329b4aba3efc9d",
+      "ingester_code_commit": "addc13b07ea5ce83c2ab1c4c7b5f5d8b4bc43c9f",
+      "deriver_code_commit": "addc13b07ea5ce83c2ab1c4c7b5f5d8b4bc43c9f",
       "deriver_tree_id": "69f0bef039a569f897e7ea81cefa6850d65606db",
       "profiles_sha256": "dc2648dad7205e41eef345172b8413322834a36850a80f266e1632f466660f65",
       "source_configuration_kind": "engineering_scope",
       "source_configuration_sha256": "04a490e489c40568ccee5a17de3f6d2988e2ba153d3a98ad72aa529f45e08d72"
     }
   ],
-  "ticket_id": "792bb730ea3812e51053fd5d49297769507f43f9917b15a6186d4b3a9cf921f0",
-  "generated_at": "2026-08-20T03:11:59Z"
+  "ticket_id": "579ba275be48082746106051a6e8dd6db54eb88c79db003b7c22253e0a709dc7",
+  "generated_at": "2026-08-21T03:17:53Z"
 }
