@@ -22,5 +22,6 @@ jobs:
       - name: Validate fleet shell
         run: >-
           bash -n fleet.sh fleet-status.sh require-ancestor.sh publish-prebuilt-index.sh
+          scripts/publish-corpus-tree.sh
           scripts/fresh-corpus-v4.sh scripts/v4-release-contract.sh
           scripts/prebuilt-publication-build.sh scripts/prebuilt-publication-release.sh
