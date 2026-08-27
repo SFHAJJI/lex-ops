@@ -75,7 +75,8 @@ for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
   works="null"
 
   echo "=== $pub ($repo) ==="
-  if git clone --depth 50 "https://x-access-token:${GH_TOKEN}@github.com/${repo}.git" "$dir"; then
+  if git clone --depth 50 --branch main --single-branch \
+       "https://x-access-token:${GH_TOKEN}@github.com/${repo}.git" "$dir"; then
     prev_works=$(jq -r '.works // 0' "$dir/manifest.json" 2>/dev/null || echo 0)
 
     # Verify the committed evidence immediately after a fresh checkout. Ingestion must never
@@ -111,14 +112,21 @@ for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
         git -C "$dir" checkout -- . || true
         outcome="failed_anomaly"
         overall_rc=1
-      elif [ -n "$(git -C "$dir" status --porcelain)" ]; then
-        git -C "$dir" config user.name "lex-ops"
-        git -C "$dir" config user.email "26882784+SFHAJJI@users.noreply.github.com"
-        # Scoped adds only — never add -A.
-        git -C "$dir" add works manifest.json NOTICE README.md 2>/dev/null
-        git -C "$dir" commit -m "nightly ingest $STAMP" && git -C "$dir" push && outcome="ran_committed" || outcome="failed"
       else
-        outcome="ran_no_change"
+        publication_outcome=$(bash scripts/publish-corpus-tree.sh "$dir" "$STAMP")
+        publication_rc=$?
+        if [ "$publication_rc" -eq 0 ]; then
+          case "$publication_outcome" in
+            ran_no_change|ran_committed) outcome="$publication_outcome" ;;
+            *) outcome="failed_publication_contract"; overall_rc=1 ;;
+          esac
+        else
+          case "$publication_outcome" in
+            failed_*) outcome="$publication_outcome" ;;
+            *) outcome="failed_publication_contract" ;;
+          esac
+          overall_rc=1
+        fi
       fi
 
       # Index rebuild happens AFTER the derive stage (lex-index/3 needs --articles;
