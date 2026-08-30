@@ -47,6 +47,7 @@ jobs:
           GH_TOKEN: ${{ secrets.LEX_OPS_TOKEN }}
           INDEX_BUILD_MODE: prebuilt
           FORCE_INDEX_PUBLISHER: ${{ inputs.force_index_publisher }}
+          SOURCE_RUN_ID_PREFIX: "gha:${{ github.run_id }}:${{ github.run_attempt }}"
         run: bash fleet.sh
 
       - name: publish status (one commit per night, never into code or corpus branches)

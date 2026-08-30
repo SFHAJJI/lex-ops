@@ -3,6 +3,12 @@
 # One cron, one credential, three-state status, pre-commit anomaly gate (§7.4 point 5).
 set -uo pipefail
 
+SOURCE_RUN_ID_PREFIX="${SOURCE_RUN_ID_PREFIX:-}"
+if [[ ! "$SOURCE_RUN_ID_PREFIX" =~ ^gha:[1-9][0-9]*:[1-9][0-9]*$ ]]; then
+  echo "ERROR: SOURCE_RUN_ID_PREFIX must be gha:<run_id>:<run_attempt>" >&2
+  exit 2
+fi
+
 STAMP="$(date -u +%FT%TZ)"
 mkdir -p status
 overall_rc=0
@@ -93,7 +99,8 @@ for pub in $(jq -r '.publishers[] | select(.enabled) | .id' publishers.json); do
       outcome="ran_no_change"
       echo "--- recovery snapshot: verified committed $pub head; publisher poll skipped"
     else
-      ingest_args=(--publisher "$pub" --corpus "$dir" --code-commit "$lex_code_commit")
+      ingest_args=(--publisher "$pub" --corpus "$dir" --code-commit "$lex_code_commit" \
+        --run-id "$SOURCE_RUN_ID_PREFIX:$pub")
       [ "$pub" = "eu-eurlex" ] \
         && ingest_args+=(--scope lex/src/Lex.Sources.EurLex/eu-scope.json)
       if dotnet run --project lex/src/Lex.Ingest -c Release -- ingest "${ingest_args[@]}"; then
