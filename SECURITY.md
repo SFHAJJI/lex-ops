@@ -1,17 +1,17 @@
 # Security
 
-This repository contains public orchestration code and public operational status only. It must not
-contain credentials, private signing material, raw publisher evidence or private Azure endpoints.
+This repository contains only the public V3 preview deployment boundary. It must not contain
+credentials, signing material, publisher evidence, corpus data, indexes, or private endpoints.
 
 Report vulnerabilities through a
 [private GitHub security advisory](https://github.com/SFHAJJI/lex-ops/security/advisories/new).
 Do not include credentials or exploit details in a public issue.
 
-The important trust boundaries are:
+The current trust boundaries are deliberately small:
 
-- Publication OIDC is bound to this repository's `production` environment, which requires a
-  reviewer and accepts deployments only from the exact `main` branch.
-- Release manifests are signed by a non-exportable Azure Key Vault key.
-- Long local builds upload only hash-pinned DB and vector files to private staging.
-- The public workflow re-verifies content, provenance and retrieval behavior before publication.
-- Candidate revisions receive zero traffic until an explicit, compare-before-switch operation.
+- GitHub OIDC supplies Azure authentication without a stored cloud credential.
+- The workflow accepts only an allowlisted registry image with an exact SHA-256 digest.
+- A uniquely named preview Container App receives no production traffic.
+- Runtime checks are bounded and the workflow always attempts exact-name teardown.
+- Signing, publication, promotion, and rollback are intentionally absent until the complete V3
+  release contract exists. This preview is never release-grade evidence.
