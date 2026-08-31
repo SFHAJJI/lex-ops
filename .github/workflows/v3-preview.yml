@@ -18,6 +18,7 @@ concurrency:
 
 jobs:
   preview:
+    environment: production
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -29,6 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3
+        id: azure_login
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -40,5 +42,5 @@ jobs:
       - name: Verify runtime behavior
         run: scripts/v3-preview.sh smoke
       - name: Remove preview and verify deletion
-        if: always()
+        if: ${{ always() && steps.azure_login.outcome == 'success' }}
         run: scripts/v3-preview.sh teardown

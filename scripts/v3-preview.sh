@@ -17,8 +17,9 @@ require_environment() {
 }
 
 read_back() {
-  az containerapp show \
+  az resource show \
     --resource-group "$V3_RESOURCE_GROUP" \
+    --resource-type Microsoft.App/containerApps \
     --name "$V3_APP_NAME" \
     --output json \
     --only-show-errors

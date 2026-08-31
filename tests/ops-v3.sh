@@ -23,6 +23,9 @@ bash -n scripts/v3-preview.sh
 grep -Fq 'name: ops-v3' .github/workflows/ops-v3.yml
 grep -Fq 'name: v3-preview' .github/workflows/v3-preview.yml
 grep -Fq 'branches: [main]' .github/workflows/ops-v3.yml
+grep -Fq '    environment: production' .github/workflows/v3-preview.yml
+grep -Fq '        id: azure_login' .github/workflows/v3-preview.yml
+grep -Fq "if: \${{ always() && steps.azure_login.outcome == 'success' }}" .github/workflows/v3-preview.yml
 if grep -Fq 'uami-lex-runtime' .github/workflows/v3-preview.yml scripts/v3-preview.sh; then
   echo 'preview is attached to the production runtime identity' >&2
   exit 1
@@ -37,7 +40,7 @@ cat > "$fixture_root/bin/az" <<'AZ'
 set -euo pipefail
 printf '%s\n' "$*" >> "$FAKE_AZ_LOG"
 case "$1 $2" in
-  'containerapp show')
+  'resource show')
     if test -f "${FAKE_AZ_SHOW_ERROR_FILE:-/nonexistent}"; then
       exit 9
     fi
