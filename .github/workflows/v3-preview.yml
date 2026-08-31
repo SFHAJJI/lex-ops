@@ -1,0 +1,44 @@
+name: v3-preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Immutable V3 image including its sha256 digest
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: v3-preview
+  cancel-in-progress: false
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      V3_APP_NAME: lex-v3-preview-${{ github.run_id }}-${{ github.run_attempt }}
+      V3_RESOURCE_GROUP: rg-platform
+      V3_ENVIRONMENT: cae-platform-law
+      V3_IMAGE: ${{ inputs.image }}
+      V3_PREVIEW_PULL_IDENTITY: /subscriptions/${{ vars.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-platform/providers/Microsoft.ManagedIdentity/userAssignedIdentities/uami-lex-v3-preview-pull
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Deploy immutable preview
+        run: |
+          fqdn="$(scripts/v3-preview.sh deploy)"
+          echo "V3_FQDN=$fqdn" >> "$GITHUB_ENV"
+      - name: Verify runtime behavior
+        run: scripts/v3-preview.sh smoke
+      - name: Remove preview and verify deletion
+        if: always()
+        run: scripts/v3-preview.sh teardown

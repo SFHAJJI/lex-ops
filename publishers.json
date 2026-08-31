@@ -1,6 +1,0 @@
-{
-  "publishers": [
-    { "id": "lu-legilux", "corpus_repo": "SFHAJJI/lex-corpus-lu-legilux", "enabled": true },
-    { "id": "eu-eurlex", "corpus_repo": "SFHAJJI/lex-corpus-eu-eurlex", "enabled": true }
-  ]
-}
