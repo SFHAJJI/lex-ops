@@ -3,7 +3,7 @@ name: ops-v3
 on:
   pull_request:
   push:
-    branches: [v3/integration]
+    branches: [main]
   workflow_dispatch:
 
 permissions:

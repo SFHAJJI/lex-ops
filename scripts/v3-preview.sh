@@ -8,7 +8,7 @@ require_environment() {
   : "${V3_RESOURCE_GROUP:?V3_RESOURCE_GROUP is required}"
   : "${V3_ENVIRONMENT:?V3_ENVIRONMENT is required}"
   : "${V3_IMAGE:?V3_IMAGE is required}"
-  : "${V3_REGISTRY_IDENTITY:?V3_REGISTRY_IDENTITY is required}"
+  : "${V3_PREVIEW_PULL_IDENTITY:?V3_PREVIEW_PULL_IDENTITY is required}"
 
   [[ "$V3_APP_NAME" =~ ^lex-v3-preview-[0-9]+-[0-9]+$ ]] \
     || { echo 'preview app name is unsafe' >&2; exit 2; }
@@ -50,9 +50,9 @@ assert scale["minReplicas"] == 0
 assert scale["maxReplicas"] == 1
 assert any(
     item.get("server", "").casefold() == registry_server.casefold()
-    and item.get("identity", "").casefold() == os.environ["V3_REGISTRY_IDENTITY"].casefold()
+    and item.get("identity", "").casefold() == os.environ["V3_PREVIEW_PULL_IDENTITY"].casefold()
     for item in registries
-), (registries, registry_server, os.environ["V3_REGISTRY_IDENTITY"])
+), (registries, registry_server, os.environ["V3_PREVIEW_PULL_IDENTITY"])
 assert configuration["ingress"]["fqdn"]
 print(configuration["ingress"]["fqdn"])
 PY
@@ -79,9 +79,9 @@ deploy() {
     --name "$V3_APP_NAME" \
     --environment "$V3_ENVIRONMENT" \
     --image "$V3_IMAGE" \
-    --user-assigned "$V3_REGISTRY_IDENTITY" \
+    --user-assigned "$V3_PREVIEW_PULL_IDENTITY" \
     --registry-server "$registry_server" \
-    --registry-identity "$V3_REGISTRY_IDENTITY" \
+    --registry-identity "$V3_PREVIEW_PULL_IDENTITY" \
     --ingress external \
     --target-port 8080 \
     --min-replicas 0 \

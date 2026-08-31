@@ -25,7 +25,7 @@ jobs:
       V3_RESOURCE_GROUP: rg-platform
       V3_ENVIRONMENT: cae-platform-law
       V3_IMAGE: ${{ inputs.image }}
-      V3_REGISTRY_IDENTITY: /subscriptions/${{ vars.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-platform/providers/Microsoft.ManagedIdentity/userAssignedIdentities/uami-lex-runtime
+      V3_PREVIEW_PULL_IDENTITY: /subscriptions/${{ vars.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-platform/providers/Microsoft.ManagedIdentity/userAssignedIdentities/uami-lex-v3-preview-pull
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3

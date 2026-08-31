@@ -22,6 +22,11 @@ test "$actual_paths" = "$expected_paths"
 bash -n scripts/v3-preview.sh
 grep -Fq 'name: ops-v3' .github/workflows/ops-v3.yml
 grep -Fq 'name: v3-preview' .github/workflows/v3-preview.yml
+grep -Fq 'branches: [main]' .github/workflows/ops-v3.yml
+if grep -Fq 'uami-lex-runtime' .github/workflows/v3-preview.yml scripts/v3-preview.sh; then
+  echo 'preview is attached to the production runtime identity' >&2
+  exit 1
+fi
 
 fixture_root="$(mktemp -d)"
 trap 'rm -rf -- "$fixture_root"' EXIT
@@ -41,7 +46,7 @@ case "$1 $2" in
     fi
     test -f "$FAKE_AZ_STATE" || exit 3
     cat <<JSON
-{"name":"$V3_APP_NAME","properties":{"managedEnvironmentId":"/subscriptions/example/resourceGroups/$V3_RESOURCE_GROUP/providers/Microsoft.App/managedEnvironments/$V3_ENVIRONMENT","configuration":{"ingress":{"external":true,"fqdn":"$V3_APP_NAME.example.test","targetPort":8080,"customDomains":[]},"registries":[{"server":"${FAKE_REGISTRY_SERVER:-crsoufien3orem.azurecr.io}","identity":"$V3_REGISTRY_IDENTITY"}]},"template":{"containers":[{"image":"$V3_IMAGE"}],"scale":{"minReplicas":0,"maxReplicas":1}}}}
+{"name":"$V3_APP_NAME","properties":{"managedEnvironmentId":"/subscriptions/example/resourceGroups/$V3_RESOURCE_GROUP/providers/Microsoft.App/managedEnvironments/$V3_ENVIRONMENT","configuration":{"ingress":{"external":true,"fqdn":"$V3_APP_NAME.example.test","targetPort":8080,"customDomains":[]},"registries":[{"server":"${FAKE_REGISTRY_SERVER:-crsoufien3orem.azurecr.io}","identity":"$V3_PREVIEW_PULL_IDENTITY"}]},"template":{"containers":[{"image":"$V3_IMAGE"}],"scale":{"minReplicas":0,"maxReplicas":1}}}}
 JSON
     ;;
   'containerapp create')
@@ -113,7 +118,7 @@ export V3_APP_NAME='lex-v3-preview-123-1'
 export V3_RESOURCE_GROUP='rg-platform'
 export V3_ENVIRONMENT='cae-platform-law'
 export V3_IMAGE='crsoufien3orem.azurecr.io/lex@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-export V3_REGISTRY_IDENTITY='/subscriptions/example/resourceGroups/rg-platform/providers/Microsoft.ManagedIdentity/userAssignedIdentities/uami-lex-runtime'
+export V3_PREVIEW_PULL_IDENTITY='/subscriptions/example/resourceGroups/rg-platform/providers/Microsoft.ManagedIdentity/userAssignedIdentities/uami-lex-v3-preview-pull'
 
 if V3_APP_NAME=production scripts/v3-preview.sh deploy 2>/dev/null; then
   echo 'unsafe app name was accepted' >&2
@@ -164,10 +169,12 @@ grep -Fq 'containerapp create' "$FAKE_AZ_LOG"
 grep -Fq -- '--min-replicas 0' "$FAKE_AZ_LOG"
 grep -Fq -- '--max-replicas 1' "$FAKE_AZ_LOG"
 grep -Fq -- "--image $V3_IMAGE" "$FAKE_AZ_LOG"
-grep -Fq -- "--user-assigned $V3_REGISTRY_IDENTITY" "$FAKE_AZ_LOG"
+grep -Fq -- "--user-assigned $V3_PREVIEW_PULL_IDENTITY" "$FAKE_AZ_LOG"
 grep -Fq -- "--environment $V3_ENVIRONMENT" "$FAKE_AZ_LOG"
 grep -Fq -- '--registry-server crsoufien3orem.azurecr.io' "$FAKE_AZ_LOG"
-grep -Fq -- "--registry-identity $V3_REGISTRY_IDENTITY" "$FAKE_AZ_LOG"
+grep -Fq -- "--registry-identity $V3_PREVIEW_PULL_IDENTITY" "$FAKE_AZ_LOG"
+grep -Fq -- '--ingress external' "$FAKE_AZ_LOG"
+grep -Fq -- '--target-port 8080' "$FAKE_AZ_LOG"
 grep -Fq 'containerapp delete' "$FAKE_AZ_LOG"
 
 echo 'ops-v3 checks passed'
